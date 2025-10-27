@@ -36,6 +36,18 @@ export function createSelectModule(opts = {}) {
   // Persisted selection across pages
   let selectedIds = new Set();
 
+  // Persisted search string so it survives DOM changes and modal open/close
+  let searchQuery = "";
+
+  // simple debounce util
+  function debounce(fn, wait = 300) {
+    let t = null;
+    return function (...args) {
+      clearTimeout(t);
+      t = setTimeout(() => fn.apply(this, args), wait);
+    };
+  }
+
   function ensureControls() {
     const modal = document.querySelector(selectModalSelector);
     if (!modal) return;
@@ -43,17 +55,30 @@ export function createSelectModule(opts = {}) {
     const footer = modal.querySelector(".modal-footer");
     if (!body || !footer) return;
 
-    // --- Search input ---
-    if (!modal.querySelector("#select-search")) {
-      const s = document.createElement("input");
+    // --- Search input (always present) ---
+    let s = modal.querySelector("#select-search");
+    if (!s) {
+      s = document.createElement("input");
       s.id = "select-search";
       s.className = "form-control mb-2";
       s.placeholder = "Search name or employee id";
+      // insert at top of modal body
       body.insertBefore(s, body.firstChild);
-      s.addEventListener("input", () => {
-        page = 1;
-        renderList();
-      });
+    }
+    // ensure the input shows the current persistent searchQuery
+    s.value = searchQuery || "";
+
+    // attach a single debounced input listener (avoid duplicate listeners)
+    if (!s._raci_search_wired) {
+      s.addEventListener(
+        "input",
+        debounce((ev) => {
+          searchQuery = (ev.target.value || "").trim();
+          page = 1;
+          renderList();
+        }, 300)
+      );
+      s._raci_search_wired = true;
     }
 
     // --- Filters toggle + wing/subwing selects ---
@@ -142,6 +167,7 @@ export function createSelectModule(opts = {}) {
           const viewAllEl = modal.querySelector("#select-view-all");
           if (viewAllEl) viewAllEl.checked = false;
         }
+        // IMPORTANT: do NOT clear searchQuery here — search must remain active
         page = 1;
         renderList();
       });
@@ -159,6 +185,7 @@ export function createSelectModule(opts = {}) {
         if (fw) fw.value = "";
         if (fs) fs.value = "";
         if (viewAllEl) viewAllEl.checked = true;
+        // do not clear searchQuery — keep whatever user typed
         page = 1;
         renderList();
       });
@@ -259,7 +286,6 @@ export function createSelectModule(opts = {}) {
         try {
           const mEl = document.querySelector(selectModalSelector);
           if (mEl) {
-            // if bootstrap 5 data-bs-modal
             const bs =
               window.bootstrap &&
               bootstrap.Modal &&
@@ -319,8 +345,8 @@ export function createSelectModule(opts = {}) {
         modal.querySelector("#select-filter-subwing").value = "";
     }
 
-    if (modal.querySelector("#select-search"))
-      modal.querySelector("#select-search").value = "";
+    // DO NOT clear searchQuery or the input here — keep persistent behavior
+    // ensureControls already restored the search input value
 
     page = 1;
     renderList();
@@ -342,22 +368,30 @@ export function createSelectModule(opts = {}) {
     const monthData = getMonthData() || { tasks: [] };
 
     const modal = document.querySelector(selectModalSelector);
-    const viewAll = modal.querySelector("#select-view-all")
-      ? modal.querySelector("#select-view-all").checked
-      : true;
-    const fw = viewAll
-      ? ""
-      : modal.querySelector("#select-filter-wing")
-      ? modal.querySelector("#select-filter-wing").value
-      : "";
-    const fs = viewAll
-      ? ""
-      : modal.querySelector("#select-filter-subwing")
-      ? modal.querySelector("#select-filter-subwing").value
-      : "";
-    const q = modal.querySelector("#select-search")
-      ? (modal.querySelector("#select-search").value || "").trim().toLowerCase()
-      : "";
+    // defensive: if modal not present, still use persisted values
+    const viewAll =
+      modal && modal.querySelector("#select-view-all")
+        ? modal.querySelector("#select-view-all").checked
+        : true;
+    const fw =
+      viewAll && modal
+        ? ""
+        : modal && modal.querySelector("#select-filter-wing")
+        ? modal.querySelector("#select-filter-wing").value
+        : "";
+    const fs =
+      viewAll && modal
+        ? ""
+        : modal && modal.querySelector("#select-filter-subwing")
+        ? modal.querySelector("#select-filter-subwing").value
+        : "";
+    // prefer DOM value if present, otherwise fallback to persistent searchQuery
+    const q =
+      modal && modal.querySelector("#select-search")
+        ? (modal.querySelector("#select-search").value || "")
+            .trim()
+            .toLowerCase()
+        : (searchQuery || "").trim().toLowerCase();
 
     const filtered = users.filter((u) => {
       if (fw) {
@@ -421,7 +455,6 @@ export function createSelectModule(opts = {}) {
       );
 
       const right = document.createElement("div");
-      const pickRole = getTempPickRole();
       const checked = selectedIds.has(String(u.id));
       right.innerHTML = `<input ${
         checked ? "checked" : ""

@@ -1,10 +1,14 @@
 // your-work.js
 // Your Work view integrated with main app month (#monthPicker)
-// - uses serviceLoadUsers / serviceLoadMonth from raci-service.js
+// - uses serviceLoadUsers / serviceLoadMonth / serviceSaveTask from raci-service.js
 // - uses raci-ui.js avatar + tooltip helpers
 // Include this file after app.js as type="module"
 
-import { serviceLoadUsers, serviceLoadMonth } from "./raci-service.js";
+import {
+  serviceLoadUsers,
+  serviceLoadMonth,
+  serviceSaveTask,
+} from "./raci-service.js";
 import {
   ensureLoadingOverlay,
   ensureToastContainer,
@@ -19,7 +23,7 @@ import {
   const $ = (s) => document.querySelector(s);
   const $$ = (s) => Array.from(document.querySelectorAll(s));
 
-  // small utils
+  /* ---------- tiny helpers ---------- */
   function esc(s) {
     if (s == null) return "";
     return String(s)
@@ -45,12 +49,10 @@ import {
     const c = (h & 0x00ffffff).toString(16).toUpperCase();
     return "#" + "00000".substring(0, 6 - c.length) + c;
   }
-
   function getCurrentMonthFromApp() {
     const el = $("#monthPicker");
     return el ? el.value || "" : "";
   }
-
   function formatMonthHuman(ym) {
     if (!ym) return "";
     const parts = String(ym).split("-");
@@ -64,12 +66,12 @@ import {
     });
   }
 
-  // ensure helpers (kept so tooltip/toast functions exist)
+  /* ---------- ensure small helpers exist ---------- */
   ensureLoadingOverlay && ensureLoadingOverlay();
   ensureToastContainer && ensureToastContainer();
   ensureBadgeTooltip && ensureBadgeTooltip();
 
-  /* ---------- avatar helpers ---------- */
+  /* ---------- avatar helpers (kept from your code) ---------- */
   function makeAvatarElement(user, size = 36) {
     const el = document.createElement("div");
     el.className = "avatar small";
@@ -194,24 +196,11 @@ import {
     return container;
   }
 
-  function makeAvatarChipById(uid, usersMap, size = 34) {
-    const u = usersMap[uid];
-    if (!u) {
-      const sp = document.createElement("div");
-      sp.className = "small text-muted";
-      sp.textContent = "—";
-      return sp;
-    }
-    const av = makeAvatarElement(u, size);
-    av.style.pointerEvents = "auto";
-    return av;
-  }
-
-  /* ---------- nav and listener management (idempotent) ---------- */
+  /* ---------- render / lifecycle helpers (idempotent) ---------- */
   let navHandler = null;
   let mainMonthListener = null;
-  let renderLock = null; // prevents parallel renders
-  let attached = false; // ensures attachNavHandler called only once
+  let renderLock = null;
+  let attached = false;
 
   function ensureNavLink() {
     let existing = document.querySelector('.nav-link[data-view="your-work"]');
@@ -257,7 +246,45 @@ import {
     return renderLock;
   }
 
-  /* ---------- main view (no showLoading/hideLoading calls) ---------- */
+  /* ---------- status helpers ---------- */
+  const STATUS_OPTIONS = [
+    "Not Started",
+    "In Progress",
+    "Completed",
+    "Blocked",
+    "On Hold",
+  ];
+  function statusToClass(s) {
+    if (!s) return "status-not-started";
+    const key = String(s).toLowerCase();
+    if (key.includes("progress")) return "status-in-progress";
+    if (key.includes("completed") || key.includes("done"))
+      return "status-completed";
+    if (key.includes("block")) return "status-blocked";
+    if (key.includes("hold")) return "status-on-hold";
+    return "status-not-started";
+  }
+  function makeStatusBadge(status) {
+    const span = document.createElement("span");
+    span.className = `status-badge ${statusToClass(status)}`;
+    span.textContent = status || "Not Started";
+    span.title = status || "";
+    span.style.padding = "6px 10px";
+    span.style.borderRadius = "999px";
+    span.style.fontWeight = 700;
+    span.style.fontSize = "0.85rem";
+    return span;
+  }
+  function makeSpinnerInline() {
+    const s = document.createElement("span");
+    s.className = "spinner-border spinner-border-sm";
+    s.setAttribute("role", "status");
+    s.setAttribute("aria-hidden", "true");
+    s.style.marginLeft = "6px";
+    return s;
+  }
+
+  /* ---------- main renderer ---------- */
   async function renderYourWorkViewInner() {
     const viewContainer = $("#view-container");
     if (!viewContainer) {
@@ -271,70 +298,66 @@ import {
 
     viewContainer.innerHTML = "";
 
-    // root card
+    // root card + styles
     const root = document.createElement("div");
     root.className = "card p-3";
 
+    const style = document.createElement("style");
+    style.textContent = `
+      .yw-top { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+      .yw-emp { min-width:220px; display:flex; align-items:center; gap:10px; }
+      .yw-search { flex:1; min-width:200px; }
+      .yw-count { color: #6c757d; font-size:0.95rem; margin-bottom:8px; }
+      .yw-list .yw-item { background:#fff; border-radius:10px; padding:12px; margin-bottom:12px; box-shadow:0 6px 18px rgba(12,34,56,0.06); border:1px solid rgba(0,0,0,0.04); }
+      .yw-item .top-grid { display:grid; grid-template-columns: 1fr 180px 300px 120px 90px; gap:12px; align-items:center; column-gap:12px; }
+      .row-title { font-weight:600; margin-bottom:4px; }
+      .row-sub { color:#6c757d; font-size:0.88rem; }
+      .roles-badges { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+      .roles-badges .badge { font-weight:700; padding:6px 8px; border-radius:8px; font-size:0.85rem; }
+      .status-wrapper { display:flex; align-items:center; gap:8px; }
+      .status-select { min-width:120px; }
+      .yw-item .detail { margin-top:10px; display:none; padding-top:10px; border-top:1px solid rgba(0,0,0,0.06); }
+      .yw-item .detail-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-top:8px; }
+      @media (max-width:980px){ .yw-item .top-grid { grid-template-columns: 1fr 1fr; } .top-grid > :nth-child(n+3){ display:none; } .top-grid > :first-child{ grid-column:1 / -1; } }
+    `;
+
     // top controls
     const top = document.createElement("div");
-    top.className = "d-flex gap-2 align-items-center mb-3 flex-wrap";
+    top.className = "yw-top";
 
     const empWrap = document.createElement("div");
+    empWrap.className = "yw-emp";
     empWrap.id = "yw-emp-area";
-    empWrap.style.minWidth = "220px";
 
     const monthWrap = document.createElement("div");
-    monthWrap.className = "d-flex align-items-center gap-2";
-    monthWrap.innerHTML = `<label class="small text-muted mb-0">Month</label>
-      <input id="yw-month-display" class="form-control form-control-sm" style="width:180px" disabled />`;
+    monthWrap.style.display = "flex";
+    monthWrap.style.alignItems = "center";
+    monthWrap.style.gap = "8px";
+    monthWrap.innerHTML = `<label class="small text-muted mb-0">Month</label><input id="yw-month-display" class="form-control form-control-sm" style="width:180px" disabled />`;
 
     const searchWrap = document.createElement("div");
-    searchWrap.style.flex = "1";
+    searchWrap.className = "yw-search";
     searchWrap.innerHTML = `<input id="yw-search" class="form-control form-control-sm" placeholder="Search tasks, wing, subwing..." />`;
 
     top.appendChild(empWrap);
     top.appendChild(monthWrap);
     top.appendChild(searchWrap);
 
-    const meta = document.createElement("div");
-    meta.className = "d-flex justify-content-between align-items-center mb-2";
     const countEl = document.createElement("div");
+    countEl.className = "yw-count";
     countEl.id = "yw-count";
-    countEl.className = "small text-muted";
-    meta.appendChild(countEl);
 
     const listRoot = document.createElement("div");
     listRoot.id = "yw-list";
     listRoot.className = "yw-list";
 
-    // minimal styles for visual separation
-    const style = document.createElement("style");
-    style.textContent = `
-      .yw-list .yw-item {
-        background: #ffffff;
-        border-radius: 10px;
-        box-shadow: 0 6px 18px rgba(12, 34, 56, 0.06);
-        padding: 12px;
-        margin-bottom: 12px;
-        border: 1px solid rgba(0,0,0,0.04);
-      }
-      .yw-list .yw-item .row-title { font-size: 1rem; margin-bottom: 4px; }
-      .yw-list .yw-item .row-sub { color: #6c757d; font-size: 0.85rem; }
-      .yw-list .yw-item .roles-badges .badge { font-weight:600; }
-      .yw-list .yw-item .task-meta { color: #6c757d; font-size: 0.9rem; }
-      .yw-list .yw-item .detail-table { background: #fff; }
-      @media (max-width: 720px) {
-        .yw-list .yw-item { padding: 10px; }
-      }
-    `;
-
     root.appendChild(style);
     root.appendChild(top);
-    root.appendChild(meta);
+    root.appendChild(countEl);
     root.appendChild(listRoot);
     viewContainer.appendChild(root);
 
-    // state
+    /* ---------- state ---------- */
     let users = [];
     let usersMap = {};
     let monthData = { tasks: [] };
@@ -353,11 +376,12 @@ import {
     function renderEmployeeArea() {
       empWrap.innerHTML = "";
       if (!empId) {
-        const el = document.createElement("div");
-        el.className = "d-flex gap-2";
-        el.innerHTML = `<input id="yw-emp-input" class="form-control form-control-sm" placeholder="Set your Employee ID" style="min-width:160px" />
+        const box = document.createElement("div");
+        box.style.display = "flex";
+        box.style.gap = "8px";
+        box.innerHTML = `<input id="yw-emp-input" class="form-control form-control-sm" placeholder="Set your Employee ID" style="min-width:160px" />
           <button id="yw-emp-save" class="btn btn-sm btn-primary">Save</button>`;
-        empWrap.appendChild(el);
+        empWrap.appendChild(box);
         $("#yw-emp-save").addEventListener("click", async () => {
           const v = ($("#yw-emp-input").value || "").trim();
           if (!v) return showToast && showToast("info", "Enter employee id");
@@ -369,9 +393,11 @@ import {
       }
 
       const wrapper = document.createElement("div");
-      wrapper.className = "d-flex gap-2 align-items-center";
+      wrapper.style.display = "flex";
+      wrapper.style.alignItems = "center";
+      wrapper.style.gap = "10px";
       wrapper.innerHTML = `<div id="yw-emp-badge" style="display:flex;align-items:center;gap:10px"></div>
-        <button id="yw-emp-change" class="btn btn-sm btn-outline-secondary ms-2">Change</button>`;
+        <button id="yw-emp-change" class="btn btn-sm btn-outline-secondary">Change</button>`;
       empWrap.appendChild(wrapper);
 
       $("#yw-emp-change").addEventListener("click", () => {
@@ -444,6 +470,7 @@ import {
       );
     }
 
+    /* ---------- render list ---------- */
     function renderList(tasks) {
       listRoot.innerHTML = "";
       const frag = document.createDocumentFragment();
@@ -460,114 +487,124 @@ import {
         const item = document.createElement("div");
         item.className = "yw-item";
 
-        const topRow = document.createElement("div");
-        topRow.style.display = "grid";
-        topRow.style.gridTemplateColumns = "1fr 140px 140px 90px";
-        topRow.style.alignItems = "center";
-        topRow.style.columnGap = "12px";
+        const topGrid = document.createElement("div");
+        topGrid.className = "top-grid";
 
-        const col1 = document.createElement("div");
-        col1.innerHTML = `<div class="row-title">${esc(t.title)}</div>
-                          <div class="row-sub">${esc(t.wing || "")} › ${esc(
+        // Title column
+        const cTitle = document.createElement("div");
+        cTitle.innerHTML = `<div class="row-title">${esc(
+          t.title
+        )}</div><div class="row-sub">${esc(t.wing || "")} › ${esc(
           t.subwing || ""
         )}</div>`;
 
-        const col2 = document.createElement("div");
-        col2.className = "task-meta";
-        col2.textContent = t.deadline || "";
-
-        const col3 = document.createElement("div");
-        col3.className = "roles-badges";
-        col3.style.display = "flex";
-        col3.style.gap = "8px";
-
+        // Roles column (compact)
+        const cRoles = document.createElement("div");
+        cRoles.className = "roles-badges";
         if ((t.responsible || []).some((id) => idEq(id, currentUserId))) {
           const b = document.createElement("span");
           b.className = "badge bg-primary";
           b.textContent = "R";
-          col3.appendChild(b);
+          cRoles.appendChild(b);
         }
         if ((t.accountable || []).some((id) => idEq(id, currentUserId))) {
           const b = document.createElement("span");
           b.className = "badge bg-success";
           b.textContent = "A";
-          col3.appendChild(b);
+          cRoles.appendChild(b);
         }
         if ((t.consulted || []).some((id) => idEq(id, currentUserId))) {
           const b = document.createElement("span");
           b.className = "badge bg-warning text-dark";
           b.textContent = "C";
-          col3.appendChild(b);
+          cRoles.appendChild(b);
         }
         if ((t.informed || []).some((id) => idEq(id, currentUserId))) {
           const b = document.createElement("span");
           b.className = "badge bg-secondary";
           b.textContent = "I";
-          col3.appendChild(b);
+          cRoles.appendChild(b);
         }
-        if (!col3.childElementCount) {
-          const dash = document.createElement("div");
-          dash.className = "small text-muted";
-          dash.textContent = "—";
-          col3.appendChild(dash);
+        if (!cRoles.childElementCount) {
+          const none = document.createElement("div");
+          none.className = "small text-muted";
+          none.textContent = "—";
+          cRoles.appendChild(none);
         }
 
-        const col4 = document.createElement("div");
-        col4.style.textAlign = "right";
-        const toggle = document.createElement("button");
-        toggle.className = "btn btn-sm btn-outline-secondary";
-        toggle.type = "button";
-        toggle.textContent = "View";
-        col4.appendChild(toggle);
+        // Status column: badge always visible. Select visible ONLY for Accountable users.
+        const cStatus = document.createElement("div");
+        cStatus.className = "status-wrapper";
+        const badgeWrap = document.createElement("div");
+        badgeWrap.appendChild(makeStatusBadge(t.status || "Not Started"));
 
-        topRow.appendChild(col1);
-        topRow.appendChild(col2);
-        topRow.appendChild(col3);
-        topRow.appendChild(col4);
+        // Determine if current user is accountable
+        const isAccountable =
+          currentUserId &&
+          Array.isArray(t.accountable) &&
+          t.accountable.some((id) => idEq(id, currentUserId));
 
-        item.appendChild(topRow);
+        // If accountable -> show select inline (clean style). Otherwise only badge.
+        let select = null;
+        if (isAccountable) {
+          select = document.createElement("select");
+          select.className = "form-select form-select-sm status-select";
+          select.setAttribute("aria-label", "Change task status");
+          STATUS_OPTIONS.forEach((opt) => {
+            const o = document.createElement("option");
+            o.value = opt;
+            o.textContent = opt;
+            if ((t.status || "") === opt) o.selected = true;
+            select.appendChild(o);
+          });
+        }
 
-        // details
+        // Save state indicator (spinner)
+        const spinnerWrap = document.createElement("span");
+        spinnerWrap.style.display = "inline-flex";
+        spinnerWrap.style.alignItems = "center";
+
+        cStatus.appendChild(badgeWrap);
+        if (select) cStatus.appendChild(select);
+        cStatus.appendChild(spinnerWrap);
+
+        // Deadline
+        const cDeadline = document.createElement("div");
+        cDeadline.className = "task-meta";
+        cDeadline.textContent = t.deadline || "";
+
+        // Actions (View/Details)
+        const cActions = document.createElement("div");
+        cActions.style.textAlign = "right";
+        const btnView = document.createElement("button");
+        btnView.className = "btn btn-sm btn-outline-secondary";
+        btnView.type = "button";
+        btnView.textContent = "View";
+        cActions.appendChild(btnView);
+
+        topGrid.appendChild(cTitle);
+        topGrid.appendChild(cRoles);
+        topGrid.appendChild(cStatus);
+        topGrid.appendChild(cDeadline);
+        topGrid.appendChild(cActions);
+
+        item.appendChild(topGrid);
+
+        // details (expandable)
         const detail = document.createElement("div");
-        detail.style.display = "none";
-        detail.className = "mt-3 detail-table";
-
-        const tableWrap = document.createElement("div");
-        tableWrap.style.borderTop = "1px solid rgba(0,0,0,0.06)";
-        tableWrap.style.padding = "12px";
-
-        const headerRow = document.createElement("div");
-        headerRow.style.display = "grid";
-        headerRow.style.gridTemplateColumns = "1fr 1fr 1fr 1fr";
-        headerRow.style.gap = "8px";
-        headerRow.style.paddingBottom = "8px";
-        headerRow.style.alignItems = "center";
-        headerRow.innerHTML = `
-          <div class="small fw-semibold">Responsible</div>
-          <div class="small fw-semibold">Accountable</div>
-          <div class="small fw-semibold">Consulted</div>
-          <div class="small fw-semibold">Informed</div>
-        `;
-        tableWrap.appendChild(headerRow);
-
-        const avatarsRow = document.createElement("div");
-        avatarsRow.style.display = "grid";
-        avatarsRow.style.gridTemplateColumns = "1fr 1fr 1fr 1fr";
-        avatarsRow.style.gap = "8px";
-        avatarsRow.style.alignItems = "start";
-
+        detail.className = "detail";
+        const detailGrid = document.createElement("div");
+        detailGrid.className = "detail-grid";
         const makeAvColumn = (arr, letter) => {
-          const container = document.createElement("div");
-          container.style.display = "flex";
-          container.style.flexWrap = "wrap";
-          container.style.gap = "8px";
-          container.style.alignItems = "flex-start";
-
+          const box = document.createElement("div");
+          box.style.display = "flex";
+          box.style.flexWrap = "wrap";
+          box.style.gap = "8px";
           if (!(arr || []).length) {
-            const none = document.createElement("div");
-            none.className = "small text-muted";
-            none.textContent = "—";
-            container.appendChild(none);
+            const dash = document.createElement("div");
+            dash.className = "small text-muted";
+            dash.textContent = "—";
+            box.appendChild(dash);
           } else {
             (arr || []).forEach((uid) => {
               const chip = makeAvatarChipWithRole(
@@ -578,33 +615,134 @@ import {
                 currentUserId
               );
               chip.style.pointerEvents = "auto";
-              container.appendChild(chip);
+              box.appendChild(chip);
             });
           }
-          return container;
+          return box;
         };
-
-        avatarsRow.appendChild(makeAvColumn(t.responsible || [], "R"));
-        avatarsRow.appendChild(makeAvColumn(t.accountable || [], "A"));
-        avatarsRow.appendChild(makeAvColumn(t.consulted || [], "C"));
-        avatarsRow.appendChild(makeAvColumn(t.informed || [], "I"));
-
-        tableWrap.appendChild(avatarsRow);
-        detail.appendChild(tableWrap);
+        detailGrid.appendChild(makeAvColumn(t.responsible || [], "R"));
+        detailGrid.appendChild(makeAvColumn(t.accountable || [], "A"));
+        detailGrid.appendChild(makeAvColumn(t.consulted || [], "C"));
+        detailGrid.appendChild(makeAvColumn(t.informed || [], "I"));
+        detail.appendChild(detailGrid);
         item.appendChild(detail);
 
-        toggle.addEventListener("click", () => {
-          const shown = detail.style.display !== "block";
-          // close others
-          $$("#yw-list .yw-item .detail-table").forEach(
+        // view toggle
+        btnView.addEventListener("click", () => {
+          const show = detail.style.display !== "block";
+          // close other details
+          $$("#yw-list .yw-item .detail").forEach(
             (d) => (d.style.display = "none")
           );
           $$("#yw-list .yw-item button").forEach(
             (b) => (b.textContent = "View")
           );
-          detail.style.display = shown ? "block" : "none";
-          toggle.textContent = shown ? "Hide" : "View";
+          detail.style.display = show ? "block" : "none";
+          btnView.textContent = show ? "Hide" : "View";
         });
+
+        // Save handler for select (only exists if isAccountable)
+        if (select) {
+          let saving = false;
+          select.addEventListener("change", async () => {
+            if (saving) return;
+            // guard: ensure still accountable
+            const stillAcc =
+              currentUserId &&
+              Array.isArray(t.accountable) &&
+              t.accountable.some((id) => idEq(id, currentUserId));
+            if (!stillAcc) {
+              showToast &&
+                showToast("error", "Only Accountable can update status");
+              // revert selection visually:
+              select.value = t.status || "Not Started";
+              return;
+            }
+
+            const newStatus = select.value;
+            const prevStatus = t.status || "";
+
+            // optimistic UI
+            t.status = newStatus;
+            badgeWrap.innerHTML = "";
+            badgeWrap.appendChild(makeStatusBadge(newStatus));
+
+            // spinner on
+            spinnerWrap.innerHTML = "";
+            spinnerWrap.appendChild(makeSpinnerInline());
+            select.disabled = true;
+            saving = true;
+
+            // prepare payload same as app.js expects
+            const payload = {
+              id: t.id,
+              month: t.month || getCurrentMonthFromApp() || "",
+              wing: t.wing,
+              subwing: t.subwing,
+              title: t.title,
+              deadline: t.deadline || "",
+              status: newStatus,
+              responsible: [...(t.responsible || [])],
+              accountable: [...(t.accountable || [])],
+              consulted: [...(t.consulted || [])],
+              informed: [...(t.informed || [])],
+              createdAt: t.createdAt || new Date().toISOString(),
+            };
+
+            try {
+              const res = await serviceSaveTask(payload);
+              if (res && res.ok) {
+                // success: reload month data best-effort
+                try {
+                  const month = getCurrentMonthFromApp() || "";
+                  monthData = (await serviceLoadMonth(month)) || monthData;
+                } catch (e) {
+                  console.warn("Failed to reload month after status save", e);
+                }
+                showToast && showToast("success", "Status updated");
+                // request main app to refresh if available
+                if (
+                  window._raci &&
+                  typeof window._raci.reloadAll === "function"
+                ) {
+                  try {
+                    window._raci.reloadAll();
+                  } catch (e) {}
+                }
+              } else {
+                // rollback
+                t.status = prevStatus;
+                badgeWrap.innerHTML = "";
+                badgeWrap.appendChild(makeStatusBadge(prevStatus));
+                select.value = prevStatus || "Not Started";
+                showToast &&
+                  showToast(
+                    "error",
+                    res && res.serverError
+                      ? "Server error while updating status"
+                      : "Failed to update status"
+                  );
+              }
+            } catch (err) {
+              // rollback
+              t.status = prevStatus;
+              badgeWrap.innerHTML = "";
+              badgeWrap.appendChild(makeStatusBadge(prevStatus));
+              select.value = prevStatus || "Not Started";
+              showToast && showToast("error", "Failed to update status");
+              console.error("Status save error:", err);
+            } finally {
+              spinnerWrap.innerHTML = "";
+              saving = false;
+              // re-enable select only if still accountable
+              const still =
+                currentUserId &&
+                Array.isArray(t.accountable) &&
+                t.accountable.some((id) => idEq(id, currentUserId));
+              select.disabled = !still;
+            }
+          });
+        }
 
         frag.appendChild(item);
       });
@@ -615,13 +753,12 @@ import {
       }`;
     }
 
-    // LOAD: single-run load (deduped by renderLock)
+    /* ---------- loading initial data ---------- */
     try {
-      // load users once
       users = await serviceLoadUsers();
       buildUsersMap(users);
 
-      // resolve current user if empId present
+      // resolve current user from empId
       currentUser = null;
       currentUserId = null;
       if (empId) {
@@ -641,10 +778,8 @@ import {
       renderEmployeeArea();
       syncMonthDisplay();
 
-      // load month tasks (sync with main app)
       const month = getCurrentMonthFromApp() || "";
       monthData = await serviceLoadMonth(month || "");
-
       const tasks = tasksForUser(monthData.tasks || []).filter(matchesSearch);
       renderList(tasks);
     } catch (err) {
@@ -652,9 +787,9 @@ import {
       showToast && showToast("error", "Failed to load Your Work");
     }
 
-    // events (idempotent attach)
-    let debounce = null;
+    /* ---------- events ---------- */
     if (searchInput) {
+      let debounce = null;
       if (searchInput.__yw_handler__)
         searchInput.removeEventListener("input", searchInput.__yw_handler__);
       searchInput.__yw_handler__ = () => {
@@ -669,7 +804,7 @@ import {
       searchInput.addEventListener("input", searchInput.__yw_handler__);
     }
 
-    // month picker watch - attach/remove safely
+    // monthPicker change - reload tasks for new month
     const mainMonthPicker = $("#monthPicker");
     if (mainMonthPicker) {
       if (mainMonthListener)
@@ -693,16 +828,25 @@ import {
       };
       mainMonthPicker.addEventListener("change", mainMonthListener);
     }
-  } // end inner render
 
-  function buildUsersMap(list) {
-    // placeholder (actual build happens inside inner function)
-    return;
-  }
+    function buildUsersMap(list) {
+      usersMap = {};
+      (list || []).forEach((u) => (usersMap[u.id] = u));
+    }
+
+    function tasksForUser(allTasks) {
+      if (!currentUserId) return [];
+      return (allTasks || []).filter((t) =>
+        ["responsible", "accountable", "consulted", "informed"].some((r) =>
+          (t[r] || []).some((id) => idEq(id, currentUserId))
+        )
+      );
+    }
+  } // end renderYourWorkViewInner
 
   attachNavHandler();
 
-  // expose a safe entry so other code can trigger the view without double-loading
+  // expose safe entry for main app
   window._yourWork = window._yourWork || {};
   window._yourWork.renderYourWorkView = safeRender;
 })();

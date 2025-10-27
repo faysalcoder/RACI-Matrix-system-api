@@ -59,15 +59,10 @@
             ><span class="label"> Manage RACI</span>
           </a>
 
-          <!-- <a class="nav-link" href="#" data-view="wings">
-    <i class="fa-solid fa-network-wired"></i><span class="label"> Wings</span>
-  </a> -->
-
           <a class="nav-link" href="#" data-view="users">
             <i class="fa-solid fa-users"></i><span class="label"> Users</span>
           </a>
 
-          <!-- NEW: Your Work -->
           <a class="nav-link" href="#" data-view="your-work">
             <i class="fa-solid fa-briefcase"></i
             ><span class="label"> Your Work</span>
@@ -83,10 +78,6 @@
             ><span class="label"> What is RACI?</span>
           </a>
         </nav>
-
-        <!-- <div class="mt-auto small-muted">
-          Data stored locally (localStorage)
-        </div> -->
       </aside>
 
       <!-- MAIN -->
@@ -324,7 +315,7 @@
       </div>
     </template>
 
-    <!-- PHASE & ROW -->
+    <!-- PHASE & ROW (order: Task, R, A, C, I, Status, Deadline, Actions) -->
     <template id="phase-tpl">
       <div class="project-phase mb-3">
         <div class="d-flex align-items-center">
@@ -342,6 +333,7 @@
             <div class="role-col">Accountable (A)</div>
             <div class="role-col">Consulted (C)</div>
             <div class="role-col">Informed (I)</div>
+            <div class="status-col">Status</div>
             <div class="deadline-col">Deadline</div>
             <div class="actions-col">Actions</div>
           </div>
@@ -353,15 +345,27 @@
 
     <template id="row-tpl">
       <div class="matrix-row matrix-item">
+        <!-- Task column -->
         <div class="task-col">
           <div class="fw-semibold row-title"></div>
-          <div class="small text-muted row-meta"></div>
+          <!-- keep small meta here if required, but actual status is in status-col -->
         </div>
+
+        <!-- Roles -->
         <div class="role-col role-r"></div>
         <div class="role-col role-a"></div>
         <div class="role-col role-c"></div>
         <div class="role-col role-i"></div>
+
+        <!-- Status column (JS uses .row-meta here) -->
+        <div class="status-col">
+          <div class="small text-muted row-meta"></div>
+        </div>
+
+        <!-- Deadline -->
         <div class="deadline-col"></div>
+
+        <!-- Actions (always last) -->
         <div class="actions-col"></div>
       </div>
     </template>
@@ -396,12 +400,15 @@
                 <label class="form-label small">Deadline</label>
                 <input id="task-deadline" type="date" class="form-control" />
               </div>
+
               <div class="col-md-4">
                 <label class="form-label small">Status</label>
                 <select id="task-status" class="form-select">
+                  <option>Not Started</option>
                   <option>In Progress</option>
-                  <option>Stuck</option>
-                  <option>Done</option>
+                  <option>Completed</option>
+                  <option>Blocked</option>
+                  <option>On Hold</option>
                 </select>
               </div>
 

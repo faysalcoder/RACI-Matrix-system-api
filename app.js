@@ -106,6 +106,84 @@ import { createSelectModule } from "./raci-select.js";
       ? new bootstrap.Modal(modalAddUserEl)
       : null;
 
+  /* ---------- inline status options + colors ---------- */
+  const STATUS_OPTIONS = [
+    "Not Started",
+    "In Progress",
+    "Completed",
+    "Blocked",
+    "On Hold",
+  ];
+  const STATUS_BG = {
+    "Not Started": "#F5F5F5",
+    "In Progress": "#E8F4FF",
+    Completed: "#E9F7EF",
+    Blocked: "#FFF1F0",
+    "On Hold": "#FFF6E6",
+  };
+
+  function applyStatusStylingToRow(rowEl, status) {
+    if (!rowEl) return;
+    const bg = STATUS_BG[status] || "";
+    const accentMap = {
+      "Not Started": "#BDBDBD",
+      "In Progress": "#4DA1FF",
+      Completed: "#2EB27E",
+      Blocked: "#F06666",
+      "On Hold": "#FFA94D",
+    };
+    const accent = accentMap[status] || "#CCCCCC";
+    rowEl.style.backgroundColor = bg;
+    rowEl.style.borderLeft = status
+      ? `4px solid ${accent}`
+      : "4px solid transparent";
+    rowEl.style.paddingLeft = rowEl.style.paddingLeft || "8px";
+  }
+
+  async function handleInlineStatusChange(taskId, newStatus, rowEl, selEl) {
+    try {
+      const task = (monthData.tasks || []).find((t) => idEq(t.id, taskId));
+      if (!task) {
+        showToast("error", "Task not found");
+        return;
+      }
+      const oldStatus = task.status || "";
+      // optimistic update
+      task.status = newStatus;
+      localSaveMonth(currentMonth, monthData);
+      applyStatusStylingToRow(rowEl, newStatus);
+
+      // try to save to server
+      const payload = { ...task, month: currentMonth };
+      const res = await serviceSaveTask(payload);
+
+      if (res && res.ok) {
+        if (res.source === "server") {
+          monthData = await serviceLoadMonth(currentMonth);
+          await reloadAll();
+        }
+        showToast("success", "Status updated");
+      } else if (res && res.serverError) {
+        task.status = oldStatus;
+        localSaveMonth(currentMonth, monthData);
+        applyStatusStylingToRow(rowEl, oldStatus);
+        selEl.value = oldStatus || "";
+        console.error("Server error:", res.raw || res);
+        showToast("error", "Server error while updating status");
+      } else {
+        task.status = oldStatus;
+        localSaveMonth(currentMonth, monthData);
+        applyStatusStylingToRow(rowEl, oldStatus);
+        selEl.value = oldStatus || "";
+        showToast("error", "Failed to save status");
+        console.error(res);
+      }
+    } catch (err) {
+      console.error("Error updating status:", err);
+      showToast("error", "Error updating status");
+    }
+  }
+
   /* ---------- avatar + tooltip wiring (kept here) ---------- */
   function makeAvatarElement(user, size = 36) {
     const el = document.createElement("div");
@@ -163,7 +241,6 @@ import { createSelectModule } from "./raci-select.js";
         const nav = document.querySelector('.nav-link[data-view="users"]');
         if (nav) nav.click();
         setTimeout(() => {
-          // render users then show user detail
           usersModule.render().then(() => showUserDetail(u));
         }, 120);
       });
@@ -172,7 +249,6 @@ import { createSelectModule } from "./raci-select.js";
   }
 
   /* ---------- users/select modules ---------- */
-  // create modules and pass required helpers/state accessors
   const usersModule = createUsersModule({
     getUsers: () => users,
     getMonthData: () => monthData,
@@ -180,7 +256,7 @@ import { createSelectModule } from "./raci-select.js";
     esc,
     idEq,
     showUserDetail,
-    containerRootSelector: "#view-container", // module will clone your users tpl inside view container
+    containerRootSelector: "#view-container",
     usersTplId: "users-tpl",
     defaultPageSize: 10,
   });
@@ -236,12 +312,9 @@ import { createSelectModule } from "./raci-select.js";
     if (monthPicker) monthPicker.value = currentMonth;
     monthPicker?.addEventListener("change", onMonthChange);
 
-    // ensure internal select modal controls (module creates if missing)
     selectModule.ensureControls();
 
-    // wiring for select modal save/clear handled inside selectModule
     selectModule.onSave(() => {
-      // when select modal saved -> update preview & close modal by module
       refreshRaciPreview();
       showToast("success", "Selection applied");
     });
@@ -329,9 +402,6 @@ import { createSelectModule } from "./raci-select.js";
     monthData = await serviceLoadMonth(currentMonth);
     hideLoading();
     updateStatsUI();
-
-    // update modules with new data (they read via getters, so no extra step needed)
-    // ensure select module filters are populated
     selectModule.populateWingFilter((wings || []).map((w) => w.name));
   }
 
@@ -370,7 +440,7 @@ import { createSelectModule } from "./raci-select.js";
     );
   }
 
-  /* ---------- render views (dashboard/manage/wings/about/reports unchanged) ---------- */
+  /* ---------- render views ---------- */
   async function renderView(view) {
     document.body.dataset.view = view;
 
@@ -400,12 +470,9 @@ import { createSelectModule } from "./raci-select.js";
     viewContainer.innerHTML = "";
     await reloadAll();
 
-    // route to each view
     if (view === "dashboard") {
-      // reuse your existing dashboard renderer by cloning template
       const tpl = document.getElementById("dashboard-tpl");
       if (tpl) viewContainer.appendChild(tpl.content.cloneNode(true));
-      // wire filter controls (same as before)
       populateSelect(
         "#filterWing",
         (wings || []).map((w) => w.name),
@@ -450,7 +517,6 @@ import { createSelectModule } from "./raci-select.js";
       if (tpl) viewContainer.appendChild(tpl.content.cloneNode(true));
       renderWingsList();
     } else if (view === "users") {
-      // delegate to users module
       await usersModule.render();
     } else if (view === "reports") {
       const tpl = document.getElementById("reports-tpl");
@@ -494,7 +560,7 @@ import { createSelectModule } from "./raci-select.js";
     }
   }
 
-  /* ---------- dashboard/manage/wings/about/report helpers (moved inline for brevity) ---------- */
+  /* ---------- dashboard/manage helpers ---------- */
   function renderDashboardArea() {
     const area = $("#dashboardArea");
     if (!area) return;
@@ -540,10 +606,22 @@ import { createSelectModule } from "./raci-select.js";
                 const row = document
                   .getElementById("row-tpl")
                   .content.cloneNode(true);
+
                 row.querySelector(".row-title").textContent = task.title;
-                row.querySelector(".row-meta").textContent = task.status || "";
-                row.querySelector(".deadline-col").textContent =
-                  task.deadline || "";
+
+                // move status before deadline
+                const metaCell = row.querySelector(".row-meta");
+                metaCell.textContent = task.status || "";
+                const deadlineCell = row.querySelector(".deadline-col");
+                deadlineCell.textContent = task.deadline || "";
+                if (
+                  metaCell &&
+                  deadlineCell &&
+                  metaCell.parentNode === deadlineCell.parentNode
+                ) {
+                  metaCell.parentNode.insertBefore(metaCell, deadlineCell);
+                }
+
                 fillRoleContainer(
                   row.querySelector(".role-r"),
                   task.responsible
@@ -554,6 +632,14 @@ import { createSelectModule } from "./raci-select.js";
                 );
                 fillRoleContainer(row.querySelector(".role-c"), task.consulted);
                 fillRoleContainer(row.querySelector(".role-i"), task.informed);
+
+                // apply styling
+                const rowRoot =
+                  row.querySelector(".matrix-row") ||
+                  row.firstElementChild ||
+                  row;
+                applyStatusStylingToRow(rowRoot, task.status || "");
+
                 rowsRoot.appendChild(row);
               });
             area.appendChild(phase);
@@ -596,7 +682,7 @@ import { createSelectModule } from "./raci-select.js";
               .getElementById("phase-tpl")
               .content.cloneNode(true);
             phase.querySelector(".phase-name").textContent = `${wing} › ${sub}`;
-            phase.querySelector(".phase-meta").textContent = `${wing} • ${sub}`;
+            // phase.querySelector(".phase-meta").textContent = `${wing} • ${sub}`;
             phase.querySelector(".phase-accent").style.background =
               colorFromString(sub || wing);
             const rowsRoot = phase.querySelector(".matrix-rows");
@@ -608,10 +694,53 @@ import { createSelectModule } from "./raci-select.js";
                 const row = document
                   .getElementById("row-tpl")
                   .content.cloneNode(true);
+
+                const rowRoot =
+                  row.querySelector(".matrix-row") ||
+                  row.firstElementChild ||
+                  row;
+                rowRoot.dataset.taskId = task.id;
+
+                // title
                 row.querySelector(".row-title").textContent = task.title;
-                row.querySelector(".row-meta").textContent = task.status || "";
-                row.querySelector(".deadline-col").textContent =
-                  task.deadline || "";
+
+                // create inline status select and ensure it's BEFORE deadline
+                const metaCell = row.querySelector(".row-meta");
+                metaCell.innerHTML = "";
+                const select = document.createElement("select");
+                select.className = "form-select form-select-sm";
+                select.style.minWidth = "150px";
+                STATUS_OPTIONS.forEach((s) => {
+                  const opt = document.createElement("option");
+                  opt.value = s;
+                  opt.textContent = s;
+                  if (s === (task.status || "")) opt.selected = true;
+                  select.appendChild(opt);
+                });
+                select.onchange = (e) =>
+                  handleInlineStatusChange(
+                    task.id,
+                    e.target.value,
+                    rowRoot,
+                    select
+                  );
+
+                metaCell.appendChild(select);
+
+                // deadline cell
+                const deadlineCell = row.querySelector(".deadline-col");
+                deadlineCell.textContent = task.deadline || "";
+
+                // move status cell before deadline cell
+                if (
+                  metaCell &&
+                  deadlineCell &&
+                  metaCell.parentNode === deadlineCell.parentNode
+                ) {
+                  metaCell.parentNode.insertBefore(metaCell, deadlineCell);
+                }
+
+                // roles
                 fillRoleContainer(
                   row.querySelector(".role-r"),
                   task.responsible
@@ -622,12 +751,18 @@ import { createSelectModule } from "./raci-select.js";
                 );
                 fillRoleContainer(row.querySelector(".role-c"), task.consulted);
                 fillRoleContainer(row.querySelector(".role-i"), task.informed);
+
+                // actions
                 const act = row.querySelector(".actions-col");
                 if (act)
                   act.innerHTML = `<div class="d-flex gap-2 justify-content-end">
             <button class="btn btn-sm btn-outline-secondary" data-action="edit-task" data-id="${task.id}"><i class="fa fa-pen"></i></button>
             <button class="btn btn-sm btn-outline-danger" data-action="delete-task" data-id="${task.id}"><i class="fa fa-trash"></i></button>
           </div>`;
+
+                // apply immediate styling according to status
+                applyStatusStylingToRow(rowRoot, task.status || "");
+
                 rowsRoot.appendChild(row);
               });
             area.appendChild(phase);
@@ -724,11 +859,9 @@ import { createSelectModule } from "./raci-select.js";
     taskWingEl.onchange = () => populateTaskSubwing(taskWingEl.value);
     refreshRaciPreview();
 
-    // wire RACI pick buttons to open select modal
     $$(".btn-raci").forEach((b) => {
       b.onclick = () => {
         tempPickRole = b.getAttribute("data-role");
-        // tell select module to open (module handles filters/search state)
         selectModule.open(tempPickRole);
       };
     });
