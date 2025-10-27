@@ -64,6 +64,49 @@ import { createSelectModule } from "./raci-select.js";
     return "#" + "00000".substring(0, 6 - c.length) + c;
   }
 
+  // Format date string like "2025-11-10" -> "10 Nov 2025"
+  function formatDateDisplay(dateStr) {
+    if (!dateStr) return "";
+    const ymd = String(dateStr)
+      .trim()
+      .match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    let d;
+    if (ymd) {
+      const y = parseInt(ymd[1], 10);
+      const m = parseInt(ymd[2], 10) - 1;
+      const day = parseInt(ymd[3], 10);
+      d = new Date(y, m, day);
+    } else {
+      d = new Date(dateStr);
+      if (isNaN(d.getTime())) return String(dateStr);
+    }
+    try {
+      return d.toLocaleDateString("en-GB", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+      });
+    } catch (e) {
+      const months = [
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
+      ];
+      return `${String(d.getDate()).padStart(2, "0")} ${
+        months[d.getMonth()] || ""
+      } ${d.getFullYear()}`;
+    }
+  }
+
   /* ---------- small UI: loading overlay & toast container & tooltip ---------- */
   function uiEnsureInit() {
     ensureLoadingOverlay();
@@ -83,6 +126,11 @@ import { createSelectModule } from "./raci-select.js";
     informed: [],
   };
   let tempPickRole = null;
+
+  // current logged-in employee id (optional) & currentUser object
+  let empId = localStorage.getItem("employee_id") || "";
+  let currentUser = null;
+  let currentUserId = null;
 
   /* ---------- UI refs ---------- */
   const navLinks = $$(".nav-link[data-view]");
@@ -184,8 +232,10 @@ import { createSelectModule } from "./raci-select.js";
     }
   }
 
-  /* ---------- avatar + tooltip wiring (kept here) ---------- */
-  function makeAvatarElement(user, size = 36) {
+  /* ---------- avatar + tooltip wiring ----------
+     makeAvatarElement accepts clickable boolean (default true)
+  */
+  function makeAvatarElement(user, size = 36, clickable = true) {
     const el = document.createElement("div");
     el.className = "avatar small";
     el.style.width = size + "px";
@@ -195,8 +245,11 @@ import { createSelectModule } from "./raci-select.js";
     el.style.display = "inline-flex";
     el.style.alignItems = "center";
     el.style.justifyContent = "center";
-    el.style.cursor = "pointer";
+    el.style.cursor = clickable ? "pointer" : "default";
     el.style.flex = "0 0 auto";
+    el.style.userSelect = "none";
+    el.style.background = "#ddd";
+
     if (user && user.profile_img) {
       const img = document.createElement("img");
       img.src = user.profile_img;
@@ -205,47 +258,110 @@ import { createSelectModule } from "./raci-select.js";
       img.style.objectFit = "cover";
       img.onerror = () => {
         if (img.parentNode) img.parentNode.removeChild(img);
-        el.textContent = initials(user.name);
-        el.style.background = colorFromString(user.name);
+        el.textContent = initials(
+          user.name || user.emp || user.employee_id || ""
+        );
+        el.style.background = colorFromString(
+          user.name || user.emp || String(Math.random())
+        );
       };
       el.appendChild(img);
     } else {
-      el.textContent = initials(user ? user.name : "");
+      el.textContent = initials(
+        user ? user.name || user.emp || user.employee_id : ""
+      );
       el.style.background = colorFromString(
-        user ? user.name : String(Math.random())
+        user
+          ? user.name || user.emp || String(Math.random())
+          : String(Math.random())
       );
     }
+
     el.addEventListener("mouseenter", (ev) => {
-      if (user && user.name) showBadgeTooltip(user.name, ev.pageX, ev.pageY);
+      const name =
+        (user && (user.name || user.emp || user.employee_id)) || "Unknown";
+      showBadgeTooltip(name, ev.pageX, ev.pageY);
     });
     el.addEventListener("mousemove", (ev) =>
       moveBadgeTooltip(ev.pageX, ev.pageY)
     );
     el.addEventListener("mouseleave", hideBadgeTooltip);
+
+    // If not clickable, prevent opening user details on click
+    if (!clickable) {
+      el.addEventListener("click", (ev) => ev.stopPropagation());
+    }
+
     return el;
   }
 
-  function fillRoleContainer(container, ids) {
-    container.innerHTML = "";
-    (ids || []).forEach((id) => {
-      const u = users.find((x) => idEq(x.id, id));
-      if (!u) {
-        const sp = document.createElement("div");
-        sp.className = "small text-muted";
-        sp.textContent = "—";
-        container.appendChild(sp);
-        return;
-      }
-      const el = makeAvatarElement(u, 35);
-      el.addEventListener("click", () => {
-        const nav = document.querySelector('.nav-link[data-view="users"]');
-        if (nav) nav.click();
-        setTimeout(() => {
-          usersModule.render().then(() => showUserDetail(u));
-        }, 120);
-      });
-      container.appendChild(el);
-    });
+  function makeAvatarChipWithRole(
+    uid,
+    usersMap,
+    roleLetter,
+    size = 44,
+    currentUserId
+  ) {
+    const u = usersMap[uid];
+    const container = document.createElement("div");
+    container.style.display = "inline-flex";
+    container.style.alignItems = "center";
+    container.style.justifyContent = "center";
+    container.style.width = `${size}px`;
+    container.style.height = `${size}px`;
+    container.style.position = "relative";
+    container.style.boxSizing = "border-box";
+    container.style.userSelect = "none";
+
+    const avWrap = document.createElement("div");
+    avWrap.style.position = "relative";
+    avWrap.style.lineHeight = "0";
+    avWrap.style.display = "inline-block";
+
+    const avatar = makeAvatarElement(u || { name: uid }, size, true);
+    avatar.style.pointerEvents = "auto";
+    avatar.style.border = "2px solid transparent";
+    avatar.style.boxSizing = "border-box";
+
+    if (currentUserId && idEq(uid, currentUserId)) {
+      avatar.style.boxShadow = "0 0 0 3px rgba(13,110,253,0.09)";
+    }
+
+    avatar.setAttribute("aria-label", u ? u.name || u.emp || uid : uid);
+    avWrap.appendChild(avatar);
+
+    const badge = document.createElement("div");
+    badge.style.position = "absolute";
+    badge.style.bottom = "-6px";
+    badge.style.right = "-6px";
+    badge.style.minWidth = "20px";
+    badge.style.height = "20px";
+    badge.style.display = "inline-flex";
+    badge.style.alignItems = "center";
+    badge.style.justifyContent = "center";
+    badge.style.borderRadius = "999px";
+    badge.style.fontSize = "11px";
+    badge.style.lineHeight = "1";
+    badge.style.boxShadow = "0 2px 6px rgba(0,0,0,0.12)";
+    badge.style.padding = "0 6px";
+    if (roleLetter === "R") {
+      badge.style.background = "#0d6efd";
+      badge.style.color = "#fff";
+    } else if (roleLetter === "A") {
+      badge.style.background = "#198754";
+      badge.style.color = "#fff";
+    } else if (roleLetter === "C") {
+      badge.style.background = "#f59e0b";
+      badge.style.color = "#000";
+    } else {
+      badge.style.background = "#6c757d";
+      badge.style.color = "#fff";
+    }
+    badge.textContent = roleLetter || "";
+    avWrap.appendChild(badge);
+
+    container.appendChild(avWrap);
+    return container;
   }
 
   /* ---------- users/select modules ---------- */
@@ -279,6 +395,37 @@ import { createSelectModule } from "./raci-select.js";
     defaultPageSize: 8,
   });
 
+  /* ---------- helper: update nav visibility by role ---------- */
+  function updateNavVisibilityByRole() {
+    // Role values: 0,1 => admin: show all tabs
+    // role 2 => restrict: hide Users (and others you don't want)
+    const allowedForNonAdmin = new Set([
+      "dashboard",
+      "your-work",
+      "manage",
+      "about",
+    ]);
+    const isAdmin =
+      currentUser && (currentUser.role === 0 || currentUser.role === 1);
+    navLinks.forEach((link) => {
+      const view = link.dataset.view;
+      if (isAdmin) {
+        link.style.display = ""; // show
+      } else {
+        if (allowedForNonAdmin.has(view)) link.style.display = "";
+        else link.style.display = "none";
+      }
+    });
+
+    // If current active nav was hidden, switch to dashboard
+    const active = document.querySelector(".nav-link.active");
+    if (active && active.style.display === "none") {
+      const dash = document.querySelector('.nav-link[data-view="dashboard"]');
+      $$("#main-nav .nav-link").forEach((n) => n.classList.remove("active"));
+      if (dash) dash.classList.add("active");
+    }
+  }
+
   /* ---------- sidebar toggle ---------- */
   function setupSidebarToggle() {
     btnToggle?.addEventListener("click", () => {
@@ -308,6 +455,7 @@ import { createSelectModule } from "./raci-select.js";
   async function init() {
     uiEnsureInit();
 
+    // wire nav links
     navLinks.forEach((a) => a.addEventListener("click", navClick));
     if (monthPicker) monthPicker.value = currentMonth;
     monthPicker?.addEventListener("change", onMonthChange);
@@ -403,6 +551,24 @@ import { createSelectModule } from "./raci-select.js";
     hideLoading();
     updateStatsUI();
     selectModule.populateWingFilter((wings || []).map((w) => w.name));
+
+    // resolve currentUser from empId (if present)
+    currentUser = null;
+    currentUserId = null;
+    empId = localStorage.getItem("employee_id") || empId || "";
+    if (empId && users && users.length) {
+      currentUser =
+        users.find(
+          (u) => String(u.emp || u.employee_id || "") === String(empId)
+        ) ||
+        users.find(
+          (u) => u.extra && String(u.extra.employee_id || "") === String(empId)
+        );
+      if (currentUser) currentUserId = currentUser.id;
+    }
+
+    // update navigation visibility according to role
+    updateNavVisibilityByRole();
   }
 
   function updateStatsUI() {
@@ -470,6 +636,18 @@ import { createSelectModule } from "./raci-select.js";
     viewContainer.innerHTML = "";
     await reloadAll();
 
+    // guard the Users page: only role 0 or 1 can access
+    const viewerIsAdmin =
+      currentUser && (currentUser.role === 0 || currentUser.role === 1);
+    if (view === "users" && !viewerIsAdmin) {
+      const card = document.createElement("div");
+      card.className = "card p-4";
+      card.innerHTML = `<h5 class="mb-2">Access Denied</h5>
+        <div class="small text-muted">You don't have permission to view the Users page.</div>`;
+      viewContainer.appendChild(card);
+      return;
+    }
+
     if (view === "dashboard") {
       const tpl = document.getElementById("dashboard-tpl");
       if (tpl) viewContainer.appendChild(tpl.content.cloneNode(true));
@@ -517,6 +695,7 @@ import { createSelectModule } from "./raci-select.js";
       if (tpl) viewContainer.appendChild(tpl.content.cloneNode(true));
       renderWingsList();
     } else if (view === "users") {
+      // already guarded above for non-admins
       await usersModule.render();
     } else if (view === "reports") {
       const tpl = document.getElementById("reports-tpl");
@@ -567,11 +746,32 @@ import { createSelectModule } from "./raci-select.js";
     area.innerHTML = "";
     const wingFilter = $("#filterWing") ? $("#filterWing").value : "";
     const subFilter = $("#filterSubwing") ? $("#filterSubwing").value : "";
-    const tasks = (monthData.tasks || []).filter((t) => {
+
+    // base tasks after wing/sub filters
+    let tasks = (monthData.tasks || []).filter((t) => {
       if (wingFilter && t.wing !== wingFilter) return false;
       if (subFilter && t.subwing !== subFilter) return false;
       return true;
     });
+
+    // apply permission:
+    // - admins (role 0 or 1) see all tasks
+    // - non-admins see tasks where they are in ANY role (R, A, C, or I)
+    const isAdmin =
+      currentUser && (currentUser.role === 0 || currentUser.role === 1);
+    if (!isAdmin) {
+      if (!currentUserId) {
+        tasks = []; // not logged in -> no tasks
+      } else {
+        tasks = tasks.filter((t) =>
+          ["responsible", "accountable", "consulted", "informed"].some(
+            (r) =>
+              Array.isArray(t[r]) && t[r].some((id) => idEq(id, currentUserId))
+          )
+        );
+      }
+    }
+
     const grouped = {};
     tasks.forEach((t) => {
       if (!grouped[t.wing]) grouped[t.wing] = {};
@@ -613,7 +813,9 @@ import { createSelectModule } from "./raci-select.js";
                 const metaCell = row.querySelector(".row-meta");
                 metaCell.textContent = task.status || "";
                 const deadlineCell = row.querySelector(".deadline-col");
-                deadlineCell.textContent = task.deadline || "";
+                deadlineCell.textContent = formatDateDisplay(
+                  task.deadline || ""
+                );
                 if (
                   metaCell &&
                   deadlineCell &&
@@ -622,16 +824,27 @@ import { createSelectModule } from "./raci-select.js";
                   metaCell.parentNode.insertBefore(metaCell, deadlineCell);
                 }
 
+                // fill role containers - avatars clickable only if viewer (currentUser) is admin (role 0 or 1)
                 fillRoleContainer(
                   row.querySelector(".role-r"),
-                  task.responsible
+                  task.responsible,
+                  true
                 );
                 fillRoleContainer(
                   row.querySelector(".role-a"),
-                  task.accountable
+                  task.accountable,
+                  true
                 );
-                fillRoleContainer(row.querySelector(".role-c"), task.consulted);
-                fillRoleContainer(row.querySelector(".role-i"), task.informed);
+                fillRoleContainer(
+                  row.querySelector(".role-c"),
+                  task.consulted,
+                  true
+                );
+                fillRoleContainer(
+                  row.querySelector(".role-i"),
+                  task.informed,
+                  true
+                );
 
                 // apply styling
                 const rowRoot =
@@ -657,11 +870,25 @@ import { createSelectModule } from "./raci-select.js";
     const subFilter = $("#manage-filter-subwing")
       ? $("#manage-filter-subwing").value
       : "";
-    const tasks = (monthData.tasks || []).filter((t) => {
+    let tasks = (monthData.tasks || []).filter((t) => {
       if (wingFilter && t.wing !== wingFilter) return false;
       if (subFilter && t.subwing !== subFilter) return false;
       return true;
     });
+
+    // permission: only admins see all tasks; others only those where currentUser is accountable
+    const isAdmin =
+      currentUser && (currentUser.role === 0 || currentUser.role === 1);
+    if (!isAdmin) {
+      if (!currentUserId) tasks = [];
+      else
+        tasks = tasks.filter(
+          (t) =>
+            Array.isArray(t.accountable) &&
+            t.accountable.some((id) => idEq(id, currentUserId))
+        );
+    }
+
     if (tasks.length === 0) {
       area.innerHTML = `<div class="card p-4 text-center text-muted">No tasks for ${currentMonth}. Add via New Task.</div>`;
       return;
@@ -682,7 +909,6 @@ import { createSelectModule } from "./raci-select.js";
               .getElementById("phase-tpl")
               .content.cloneNode(true);
             phase.querySelector(".phase-name").textContent = `${wing} › ${sub}`;
-            // phase.querySelector(".phase-meta").textContent = `${wing} • ${sub}`;
             phase.querySelector(".phase-accent").style.background =
               colorFromString(sub || wing);
             const rowsRoot = phase.querySelector(".matrix-rows");
@@ -727,9 +953,11 @@ import { createSelectModule } from "./raci-select.js";
 
                 metaCell.appendChild(select);
 
-                // deadline cell
+                // deadline cell: formatted
                 const deadlineCell = row.querySelector(".deadline-col");
-                deadlineCell.textContent = task.deadline || "";
+                deadlineCell.textContent = formatDateDisplay(
+                  task.deadline || ""
+                );
 
                 // move status cell before deadline cell
                 if (
@@ -740,17 +968,27 @@ import { createSelectModule } from "./raci-select.js";
                   metaCell.parentNode.insertBefore(metaCell, deadlineCell);
                 }
 
-                // roles
+                // roles - avatars clickable only if viewer (currentUser) is admin
                 fillRoleContainer(
                   row.querySelector(".role-r"),
-                  task.responsible
+                  task.responsible,
+                  true
                 );
                 fillRoleContainer(
                   row.querySelector(".role-a"),
-                  task.accountable
+                  task.accountable,
+                  true
                 );
-                fillRoleContainer(row.querySelector(".role-c"), task.consulted);
-                fillRoleContainer(row.querySelector(".role-i"), task.informed);
+                fillRoleContainer(
+                  row.querySelector(".role-c"),
+                  task.consulted,
+                  true
+                );
+                fillRoleContainer(
+                  row.querySelector(".role-i"),
+                  task.informed,
+                  true
+                );
 
                 // actions
                 const act = row.querySelector(".actions-col");
@@ -805,6 +1043,46 @@ import { createSelectModule } from "./raci-select.js";
     });
   }
 
+  /* ---------- fillRoleContainer ----------
+     Accepts `allowViewerClick` boolean. Avatars will be clickable only when:
+       - allowViewerClick is true (context allows it), AND
+       - current viewer (currentUser) has role 0 or 1 (admin).
+     For role === 2 viewers avatars are never clickable and Users page is hidden.
+  */
+  function fillRoleContainer(container, ids, allowViewerClick = true) {
+    container.innerHTML = "";
+    const viewerIsAdmin =
+      currentUser && (currentUser.role === 0 || currentUser.role === 1);
+    const avatarsClickable = !!allowViewerClick && !!viewerIsAdmin;
+    (ids || []).forEach((id) => {
+      const u = users.find((x) => idEq(x.id, id));
+      if (!u) {
+        const sp = document.createElement("div");
+        sp.className = "small text-muted";
+        sp.textContent = "—";
+        container.appendChild(sp);
+        return;
+      }
+
+      const el = makeAvatarElement(u, 35, avatarsClickable);
+      if (avatarsClickable) {
+        el.addEventListener("click", () => {
+          // Only open Users page if the viewer is admin (guard again)
+          if (!viewerIsAdmin) return;
+          const nav = document.querySelector('.nav-link[data-view="users"]');
+          if (nav) nav.click();
+          setTimeout(() => {
+            usersModule.render().then(() => showUserDetail(u));
+          }, 120);
+        });
+      } else {
+        // Make sure clicking doesn't navigate or open details
+        el.addEventListener("click", (ev) => ev.stopImmediatePropagation());
+      }
+      container.appendChild(el);
+    });
+  }
+
   /* ---------- select / task modal integration ---------- */
   async function openTaskModal(taskId = null, preWing = "", preSub = "") {
     users = await serviceLoadUsers();
@@ -831,6 +1109,7 @@ import { createSelectModule } from "./raci-select.js";
       taskWingEl.value = t.wing;
       populateTaskSubwing(t.wing, t.subwing);
       taskTitleEl.value = t.title;
+      // keep ISO for form input (value), but the UI displays formatted elsewhere
       taskDeadlineEl.value = t.deadline || "";
       taskStatusEl.value = t.status || "In Progress";
       tempRaci = {
@@ -846,12 +1125,15 @@ import { createSelectModule } from "./raci-select.js";
       taskTitleEl.value = "";
       taskDeadlineEl.value = "";
       taskStatusEl.value = "In Progress";
+
+      // NEW TASK: auto-select creator as Accountable (if we have a currentUserId)
       tempRaci = {
         responsible: [],
-        accountable: [],
+        accountable: currentUserId ? [currentUserId] : [],
         consulted: [],
         informed: [],
       };
+
       if (preWing) taskWingEl.value = preWing;
       if (preSub) populateTaskSubwing(preWing || "", preSub);
     }
@@ -859,6 +1141,7 @@ import { createSelectModule } from "./raci-select.js";
     taskWingEl.onchange = () => populateTaskSubwing(taskWingEl.value);
     refreshRaciPreview();
 
+    // btn-raci opens the select modal for editing roles
     $$(".btn-raci").forEach((b) => {
       b.onclick = () => {
         tempPickRole = b.getAttribute("data-role");
@@ -1038,7 +1321,7 @@ import { createSelectModule } from "./raci-select.js";
     tasks.forEach((t) => {
       html += `<tr><td>${esc(t.wing)}</td><td>${esc(t.subwing)}</td><td>${esc(
         t.title
-      )}</td><td>${esc(t.deadline || "")}</td><td>${esc(
+      )}</td><td>${esc(formatDateDisplay(t.deadline || ""))}</td><td>${esc(
         namesFromIds(t.responsible || [])
       )}</td><td>${esc(namesFromIds(t.accountable || []))}</td><td>${esc(
         namesFromIds(t.consulted || [])
@@ -1068,7 +1351,7 @@ import { createSelectModule } from "./raci-select.js";
               t.wing,
               t.subwing,
               t.title,
-              t.deadline || "",
+              formatDateDisplay(t.deadline || ""),
               role.charAt(0).toUpperCase(),
               u.name,
               u.emp || u.employee_id || "",
@@ -1081,7 +1364,15 @@ import { createSelectModule } from "./raci-select.js";
           (r) => (t[r] || []).length === 0
         )
       )
-        rows.push([t.wing, t.subwing, t.title, t.deadline || "", "", "", ""]);
+        rows.push([
+          t.wing,
+          t.subwing,
+          t.title,
+          formatDateDisplay(t.deadline || ""),
+          "",
+          "",
+          "",
+        ]);
     });
     const csv = rows
       .map((r) =>
@@ -1128,6 +1419,15 @@ import { createSelectModule } from "./raci-select.js";
     return r.join(", ") || "—";
   }
   function showUserDetail(user) {
+    // Guard: only admin viewers can open user detail
+    const viewerIsAdmin =
+      currentUser && (currentUser.role === 0 || currentUser.role === 1);
+    if (!viewerIsAdmin) {
+      showToast &&
+        showToast("error", "You don't have permission to view user details.");
+      return;
+    }
+
     const detail = $("#userDetail");
     if (!detail) return;
     monthData = monthData || { tasks: [] };
@@ -1139,7 +1439,8 @@ import { createSelectModule } from "./raci-select.js";
     detail.innerHTML = "";
     const header = document.createElement("div");
     header.className = "mb-2 d-flex align-items-center gap-2";
-    header.appendChild(makeAvatarElement(user, 48));
+    // show non-clickable avatar in user detail header
+    header.appendChild(makeAvatarElement(user, 48, false));
     const htext = document.createElement("div");
     htext.innerHTML = `<strong>${esc(
       user.name
@@ -1195,7 +1496,7 @@ import { createSelectModule } from "./raci-select.js";
       const right = document.createElement("div");
       right.style.justifySelf = "end";
       right.className = "small text-muted";
-      right.textContent = t.deadline || "";
+      right.textContent = formatDateDisplay(t.deadline || "");
 
       top.appendChild(left);
       top.appendChild(middle);
@@ -1243,7 +1544,7 @@ import { createSelectModule } from "./raci-select.js";
     serviceLoadMonth,
     serviceSaveTask,
     serviceDeleteTask,
-    getState: () => ({ users, wings, monthData, currentMonth }),
+    getState: () => ({ users, wings, monthData, currentMonth, currentUser }),
     showToast,
   };
 })();

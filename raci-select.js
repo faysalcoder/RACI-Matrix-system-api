@@ -48,6 +48,108 @@ export function createSelectModule(opts = {}) {
     };
   }
 
+  /* ---------- helper: render selected badges UI ---------- */
+  function ensureSelectedContainer() {
+    const modal = document.querySelector(selectModalSelector);
+    if (!modal) return null;
+    const body = modal.querySelector(".modal-body");
+    if (!body) return null;
+
+    let selWrap = modal.querySelector("#select-selected-list");
+    if (!selWrap) {
+      selWrap = document.createElement("div");
+      selWrap.id = "select-selected-list";
+      selWrap.className = "mb-2";
+      // insert after search/filters if present, otherwise at top
+      const searchEl = modal.querySelector("#select-search");
+      const filtersEl = modal.querySelector("#select-filters");
+      if (filtersEl && filtersEl.nextSibling)
+        body.insertBefore(selWrap, filtersEl.nextSibling);
+      else if (searchEl && searchEl.nextSibling)
+        body.insertBefore(selWrap, searchEl.nextSibling);
+      else body.insertBefore(selWrap, body.firstChild);
+    }
+    return selWrap;
+  }
+
+  function renderSelectedBadges() {
+    const selWrap = ensureSelectedContainer();
+    if (!selWrap) return;
+    selWrap.innerHTML = "";
+
+    const users = getUsers() || [];
+    if (!selectedIds || selectedIds.size === 0) {
+      const none = document.createElement("div");
+      none.className = "small text-muted";
+      none.textContent = "No users selected.";
+      selWrap.appendChild(none);
+      return;
+    }
+
+    const row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.flexWrap = "wrap";
+    row.style.gap = "8px";
+    row.style.alignItems = "center";
+
+    // show up to many badges; each badge: avatar + name + close button
+    Array.from(selectedIds).forEach((id) => {
+      const u = users.find((x) => idEq(x.id, id)) || { id };
+      const badge = document.createElement("div");
+      badge.className = "d-flex align-items-center";
+      badge.style.background = "#f8fafc";
+      badge.style.border = "1px solid rgba(15,23,42,0.04)";
+      badge.style.padding = "6px 8px";
+      badge.style.borderRadius = "999px";
+      badge.style.gap = "8px";
+      badge.style.alignItems = "center";
+
+      // avatar (small)
+      const av = makeAvatarElement(u, 28);
+      av.style.width = "28px";
+      av.style.height = "28px";
+      av.style.flex = "0 0 auto";
+      av.style.cursor = "pointer";
+      // clicking avatar navigates selection -> toggle removal for convenience
+      av.addEventListener("click", () => {
+        // remove on avatar click
+        selectedIds.delete(String(id));
+        renderSelectedBadges();
+        renderList(); // update checkboxes
+      });
+
+      const txt = document.createElement("div");
+      txt.style.display = "flex";
+      txt.style.flexDirection = "column";
+      txt.style.justifyContent = "center";
+      txt.style.minWidth = "70px";
+      txt.innerHTML = `<div style="font-weight:600;font-size:0.9rem;">${esc(
+        u.name || u.emp || u.id
+      )}</div><div style="font-size:0.75rem;color:#6b7280">${esc(
+        u.emp || u.employee_id || ""
+      )}</div>`;
+
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn btn-sm btn-outline-danger";
+      btn.style.marginLeft = "8px";
+      btn.textContent = "×";
+      btn.title = "Remove";
+      btn.addEventListener("click", () => {
+        selectedIds.delete(String(id));
+        renderSelectedBadges();
+        renderList();
+      });
+
+      badge.appendChild(av);
+      badge.appendChild(txt);
+      badge.appendChild(btn);
+      row.appendChild(badge);
+    });
+
+    selWrap.appendChild(row);
+  }
+
   function ensureControls() {
     const modal = document.querySelector(selectModalSelector);
     if (!modal) return;
@@ -167,7 +269,6 @@ export function createSelectModule(opts = {}) {
           const viewAllEl = modal.querySelector("#select-view-all");
           if (viewAllEl) viewAllEl.checked = false;
         }
-        // IMPORTANT: do NOT clear searchQuery here — search must remain active
         page = 1;
         renderList();
       });
@@ -185,7 +286,6 @@ export function createSelectModule(opts = {}) {
         if (fw) fw.value = "";
         if (fs) fs.value = "";
         if (viewAllEl) viewAllEl.checked = true;
-        // do not clear searchQuery — keep whatever user typed
         page = 1;
         renderList();
       });
@@ -211,6 +311,10 @@ export function createSelectModule(opts = {}) {
         }
       });
     }
+
+    // --- selected list container (shows chosen users as badges) ---
+    ensureSelectedContainer();
+    renderSelectedBadges();
 
     // --- user list container ---
     if (!document.querySelector("#select-user-list")) {
@@ -268,7 +372,7 @@ export function createSelectModule(opts = {}) {
       if (!pickRole) return;
       selectedIds.clear();
       setTempRaci({ ...getTempRaci(), [pickRole]: [] });
-      // rerender so checkboxes reflect cleared state
+      renderSelectedBadges();
       renderList();
       if (onClearCb) onClearCb();
     });
@@ -282,7 +386,6 @@ export function createSelectModule(opts = {}) {
       ) {
         modalSelectInstance.hide();
       } else {
-        // fallback: try to find bootstrap Modal via DOM and call .hide
         try {
           const mEl = document.querySelector(selectModalSelector);
           if (mEl) {
@@ -346,15 +449,12 @@ export function createSelectModule(opts = {}) {
     }
 
     // DO NOT clear searchQuery or the input here — keep persistent behavior
-    // ensureControls already restored the search input value
-
     page = 1;
     renderList();
 
     if (modalSelectInstance && typeof modalSelectInstance.show === "function") {
       modalSelectInstance.show();
     } else {
-      // fallback: add .show class
       const mEl = document.querySelector(selectModalSelector);
       if (mEl) mEl.classList.add("show");
     }
@@ -478,10 +578,13 @@ export function createSelectModule(opts = {}) {
         if (!uid) return;
         if (ev.target.checked) selectedIds.add(String(uid));
         else selectedIds.delete(String(uid));
+        renderSelectedBadges();
       });
     });
 
     renderPagination(total);
+    // ensure selected badges reflect current selectedIds
+    renderSelectedBadges();
   }
 
   function renderPagination(totalItems) {

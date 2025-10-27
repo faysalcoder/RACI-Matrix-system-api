@@ -66,6 +66,50 @@ import {
     });
   }
 
+  // Format date strings to "10 Nov 2025"
+  function formatDateDisplay(dateStr) {
+    if (!dateStr) return "";
+    const s = String(dateStr).trim();
+    // Prefer YYYY-MM-DD parse
+    const ymd = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    let d;
+    if (ymd) {
+      const y = parseInt(ymd[1], 10);
+      const m = parseInt(ymd[2], 10) - 1;
+      const day = parseInt(ymd[3], 10);
+      d = new Date(y, m, day);
+    } else {
+      d = new Date(s);
+      if (isNaN(d.getTime())) return s;
+    }
+    try {
+      // Use en-GB with short month to match "10 Nov 2025"
+      return d.toLocaleDateString("en-GB", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+      });
+    } catch (e) {
+      const months = [
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
+      ];
+      return `${String(d.getDate()).padStart(2, "0")} ${
+        months[d.getMonth()] || ""
+      } ${d.getFullYear()}`;
+    }
+  }
+
   /* ---------- ensure small helpers exist ---------- */
   ensureLoadingOverlay && ensureLoadingOverlay();
   ensureToastContainer && ensureToastContainer();
@@ -273,6 +317,12 @@ import {
     span.style.borderRadius = "999px";
     span.style.fontWeight = 700;
     span.style.fontSize = "0.85rem";
+    // Prevent wrapping of status text
+    span.style.whiteSpace = "nowrap";
+    span.style.display = "inline-block";
+    span.style.maxWidth = "220px";
+    span.style.overflow = "hidden";
+    span.style.textOverflow = "ellipsis";
     return span;
   }
   function makeSpinnerInline() {
@@ -309,16 +359,28 @@ import {
       .yw-search { flex:1; min-width:200px; }
       .yw-count { color: #6c757d; font-size:0.95rem; margin-bottom:8px; }
       .yw-list .yw-item { background:#fff; border-radius:10px; padding:12px; margin-bottom:12px; box-shadow:0 6px 18px rgba(12,34,56,0.06); border:1px solid rgba(0,0,0,0.04); }
-      .yw-item .top-grid { display:grid; grid-template-columns: 1fr 180px 300px 120px 90px; gap:12px; align-items:center; column-gap:12px; }
-      .row-title { font-weight:600; margin-bottom:4px; }
-      .row-sub { color:#6c757d; font-size:0.88rem; }
-      .roles-badges { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-      .roles-badges .badge { font-weight:700; padding:6px 8px; border-radius:8px; font-size:0.85rem; }
-      .status-wrapper { display:flex; align-items:center; gap:8px; }
-      .status-select { min-width:120px; }
+      /* top grid columns: title, roles, status, deadline, actions */
+      .yw-item .top-grid { display:grid; grid-template-columns: 1fr 200px 260px 140px 90px; gap:12px; align-items:center; column-gap:12px; }
+      .row-title { font-weight:600; margin-bottom:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .row-sub { color:#6c757d; font-size:0.88rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .roles-badges { display:flex; gap:8px; align-items:center; flex-wrap:wrap; min-width:0; justify-content:flex-start; }
+      .roles-badges .badge { font-weight:700; padding:6px 8px; border-radius:8px; font-size:0.85rem; white-space:nowrap; }
+      .status-wrapper { display:flex; align-items:center; gap:8px; white-space:nowrap; min-width:0; }
+      .status-select { min-width:140px; max-width:220px; white-space:nowrap; }
       .yw-item .detail { margin-top:10px; display:none; padding-top:10px; border-top:1px solid rgba(0,0,0,0.06); }
       .yw-item .detail-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-top:8px; }
-      @media (max-width:980px){ .yw-item .top-grid { grid-template-columns: 1fr 1fr; } .top-grid > :nth-child(n+3){ display:none; } .top-grid > :first-child{ grid-column:1 / -1; } }
+      .status-badge.status-in-progress { background:#E8F4FF; color:#0d6efd; border-radius:12px; padding:6px 10px; border:1px solid rgba(77,161,255,0.15); }
+      .status-badge.status-completed { background:#E9F7EF; color:#2eb27e; border:1px solid rgba(46,178,126,0.12); }
+      .status-badge.status-blocked { background:#FFF1F0; color:#f06666; border:1px solid rgba(240,102,102,0.12); }
+      .status-badge.status-on-hold { background:#FFF6E6; color:#ffa94d; border:1px solid rgba(255,169,77,0.12); }
+      .status-badge.status-not-started { background:#F5F5F5; color:#6c757d; border:1px solid rgba(108,117,125,0.06); }
+      /* make sure long titles won't push layout badly */
+      .top-grid > div { min-width: 0; }
+      @media (max-width:980px){
+        .yw-item .top-grid { grid-template-columns: 1fr 1fr; }
+        .top-grid > :nth-child(n+3){ display:none; }
+        .top-grid > :first-child{ grid-column:1 / -1; }
+      }
     `;
 
     // top controls
@@ -462,10 +524,13 @@ import {
     function matchesSearch(t) {
       const q = (searchInput.value || "").trim().toLowerCase();
       if (!q) return true;
+      const deadlineFormatted =
+        (t.deadline && formatDateDisplay(t.deadline)) || "";
       return (
         (t.title || "").toLowerCase().includes(q) ||
         (t.wing || "").toLowerCase().includes(q) ||
         (t.subwing || "").toLowerCase().includes(q) ||
+        (deadlineFormatted || "").toLowerCase().includes(q) ||
         (t.deadline || "").toLowerCase().includes(q)
       );
     }
@@ -492,11 +557,13 @@ import {
 
         // Title column
         const cTitle = document.createElement("div");
-        cTitle.innerHTML = `<div class="row-title">${esc(
-          t.title
-        )}</div><div class="row-sub">${esc(t.wing || "")} › ${esc(
-          t.subwing || ""
-        )}</div>`;
+        const titleText = esc(t.title || "");
+        cTitle.innerHTML = `<div class="row-title" title="${titleText}">${titleText}</div>
+                            <div class="row-sub" title="${esc(
+                              t.wing || ""
+                            )} › ${esc(t.subwing || "")}">${esc(
+          t.wing || ""
+        )} › ${esc(t.subwing || "")}</div>`;
 
         // Roles column (compact)
         const cRoles = document.createElement("div");
@@ -568,10 +635,12 @@ import {
         if (select) cStatus.appendChild(select);
         cStatus.appendChild(spinnerWrap);
 
-        // Deadline
+        // Deadline (formatted)
         const cDeadline = document.createElement("div");
         cDeadline.className = "task-meta";
-        cDeadline.textContent = t.deadline || "";
+        const formatted = formatDateDisplay(t.deadline || "");
+        cDeadline.textContent = formatted;
+        if (formatted) cDeadline.title = formatted;
 
         // Actions (View/Details)
         const cActions = document.createElement("div");
@@ -644,6 +713,9 @@ import {
         // Save handler for select (only exists if isAccountable)
         if (select) {
           let saving = false;
+          // set disabled initial state defensively if not actually accountable
+          select.disabled = !isAccountable;
+
           select.addEventListener("change", async () => {
             if (saving) return;
             // guard: ensure still accountable
@@ -673,10 +745,10 @@ import {
             select.disabled = true;
             saving = true;
 
-            // prepare payload same as app.js expects
+            // prepare payload - keep same shape app expects
             const payload = {
               id: t.id,
-              month: t.month || getCurrentMonthFromApp() || "",
+              month: getCurrentMonthFromApp() || "",
               wing: t.wing,
               subwing: t.subwing,
               title: t.title,
@@ -692,7 +764,7 @@ import {
             try {
               const res = await serviceSaveTask(payload);
               if (res && res.ok) {
-                // success: reload month data best-effort
+                // attempt to refresh month data
                 try {
                   const month = getCurrentMonthFromApp() || "";
                   monthData = (await serviceLoadMonth(month)) || monthData;
@@ -700,7 +772,7 @@ import {
                   console.warn("Failed to reload month after status save", e);
                 }
                 showToast && showToast("success", "Status updated");
-                // request main app to refresh if available
+                // ask main app to refresh if available
                 if (
                   window._raci &&
                   typeof window._raci.reloadAll === "function"
