@@ -107,6 +107,29 @@ import { createSelectModule } from "./raci-select.js";
     }
   }
 
+  /* ---------- check deadline helpers ---------- */
+  // Returns true if deadline (yyyy-mm-dd or other date parseable) is strictly before now.
+  // For date-only deadlines we treat the deadline as 23:59:59 on the given day.
+  function isDeadlinePast(deadlineStr) {
+    if (!deadlineStr) return false;
+    const ymd = String(deadlineStr)
+      .trim()
+      .match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    let dl;
+    if (ymd) {
+      const y = parseInt(ymd[1], 10);
+      const m = parseInt(ymd[2], 10) - 1;
+      const d = parseInt(ymd[3], 10);
+      // end of day
+      dl = new Date(y, m, d, 23, 59, 59, 999);
+    } else {
+      dl = new Date(deadlineStr);
+    }
+    if (isNaN(dl.getTime())) return false;
+    const now = new Date();
+    return now.getTime() > dl.getTime();
+  }
+
   /* ---------- small UI: loading overlay & toast container & tooltip ---------- */
   function uiEnsureInit() {
     ensureLoadingOverlay();
@@ -161,6 +184,7 @@ import { createSelectModule } from "./raci-select.js";
     "Completed",
     "Blocked",
     "On Hold",
+    "Overdue",
   ];
   const STATUS_BG = {
     "Not Started": "#F5F5F5",
@@ -168,6 +192,7 @@ import { createSelectModule } from "./raci-select.js";
     Completed: "#E9F7EF",
     Blocked: "#FFF1F0",
     "On Hold": "#FFF6E6",
+    Overdue: "#FFF1F0",
   };
 
   function applyStatusStylingToRow(rowEl, status) {
@@ -179,6 +204,7 @@ import { createSelectModule } from "./raci-select.js";
       Completed: "#2EB27E",
       Blocked: "#F06666",
       "On Hold": "#FFA94D",
+      Overdue: "#D03434",
     };
     const accent = accentMap[status] || "#CCCCCC";
     rowEl.style.backgroundColor = bg;
@@ -186,6 +212,80 @@ import { createSelectModule } from "./raci-select.js";
       ? `4px solid ${accent}`
       : "4px solid transparent";
     rowEl.style.paddingLeft = rowEl.style.paddingLeft || "8px";
+  }
+
+  // If a task is In Progress and deadline has passed, convert it to Overdue:
+  //  - update monthData locally (optimistic)
+  //  - persist via serviceSaveTask() in background
+  // returns true if we changed the status locally
+  async function ensureOverdueStatusIfNeeded(task) {
+    try {
+      if (!task || !task.deadline) return false;
+      const cur = String(task.status || "").trim();
+      // do not change if already Completed, On Hold, Blocked, or Overdue
+      const protectedStatuses = new Set([
+        "Completed",
+        "On Hold",
+        "Blocked",
+        "Overdue",
+      ]);
+      if (protectedStatuses.has(cur)) return false;
+      // Only auto-convert if currently "In Progress" and deadline passed
+      if (cur === "In Progress" && isDeadlinePast(task.deadline)) {
+        // local optimistic update
+        const prev = task.status || "";
+        task.status = "Overdue";
+        localSaveMonth(currentMonth, monthData);
+        // prepare payload for server (keep same shape)
+        const payload = {
+          id: task.id,
+          month: currentMonth,
+          wing: task.wing,
+          subwing: task.subwing,
+          title: task.title,
+          deadline: task.deadline || "",
+          status: task.status,
+          responsible: [...(task.responsible || [])],
+          accountable: [...(task.accountable || [])],
+          consulted: [...(task.consulted || [])],
+          informed: [...(task.informed || [])],
+          createdAt: task.createdAt || new Date().toISOString(),
+        };
+        // fire-and-forget save; show toast on success
+        serviceSaveTask(payload)
+          .then((res) => {
+            if (res && res.ok) {
+              // optionally notify
+              showToast &&
+                showToast("info", "Task marked Overdue (deadline passed)");
+              // try to refresh month data if server is authoritative
+              if (res.source === "server") {
+                return serviceLoadMonth(currentMonth).then((md) => {
+                  monthData = md || monthData;
+                });
+              }
+            } else {
+              // rollback locally if server refused (best-effort)
+              // (we keep the local optimistic change, but revert if server returned serverError)
+              if (res && res.serverError) {
+                task.status = prev;
+                localSaveMonth(currentMonth, monthData);
+                showToast &&
+                  showToast("error", "Failed to persist overdue status");
+              }
+            }
+          })
+          .catch((err) => {
+            console.warn("Failed save Overdue:", err);
+            // keep optimistic local change; it can be resolved later manually
+          });
+        return true;
+      }
+      return false;
+    } catch (err) {
+      console.error("ensureOverdueStatusIfNeeded error", err);
+      return false;
+    }
   }
 
   async function handleInlineStatusChange(taskId, newStatus, rowEl, selEl) {
@@ -295,72 +395,51 @@ import { createSelectModule } from "./raci-select.js";
     return el;
   }
 
-  function makeAvatarChipWithRole(
+  /* ---------- avatar chip with overlay badge (inside avatar) ----------
+     Creates an avatar element wrapped in a container and inserts a badge element
+     inside the avatar (absolutely positioned). The badge is visible only on mobile
+     via CSS, and hidden on desktop (as requested).
+  */
+  function makeAvatarChipWithBadge(
     uid,
-    usersMap,
-    roleLetter,
+    roleLetter = "",
     size = 44,
     currentUserId
   ) {
-    const u = usersMap[uid];
+    const u = (users || []).find((x) => idEq(x.id, uid)) || null;
+
     const container = document.createElement("div");
-    container.style.display = "inline-flex";
-    container.style.alignItems = "center";
-    container.style.justifyContent = "center";
-    container.style.width = `${size}px`;
-    container.style.height = `${size}px`;
-    container.style.position = "relative";
-    container.style.boxSizing = "border-box";
-    container.style.userSelect = "none";
+    container.className = "avatar-chip";
 
-    const avWrap = document.createElement("div");
-    avWrap.style.position = "relative";
-    avWrap.style.lineHeight = "0";
-    avWrap.style.display = "inline-block";
+    // avatar wrapper (relative) so the badge can be absolutely positioned inside
+    const avatarWrap = document.createElement("div");
+    avatarWrap.className = "avatar-with-badge";
+    avatarWrap.style.display = "inline-block";
+    avatarWrap.style.position = "relative";
+    avatarWrap.style.lineHeight = 0;
 
+    // create avatar element (clickable depending on usage)
     const avatar = makeAvatarElement(u || { name: uid }, size, true);
-    avatar.style.pointerEvents = "auto";
-    avatar.style.border = "2px solid transparent";
+    avatar.style.width = size + "px";
+    avatar.style.height = size + "px";
+    avatar.style.borderRadius = "50%";
     avatar.style.boxSizing = "border-box";
-
     if (currentUserId && idEq(uid, currentUserId)) {
       avatar.style.boxShadow = "0 0 0 3px rgba(13,110,253,0.09)";
     }
-
     avatar.setAttribute("aria-label", u ? u.name || u.emp || uid : uid);
-    avWrap.appendChild(avatar);
 
-    const badge = document.createElement("div");
-    badge.style.position = "absolute";
-    badge.style.bottom = "-6px";
-    badge.style.right = "-6px";
-    badge.style.minWidth = "20px";
-    badge.style.height = "20px";
-    badge.style.display = "inline-flex";
-    badge.style.alignItems = "center";
-    badge.style.justifyContent = "center";
-    badge.style.borderRadius = "999px";
-    badge.style.fontSize = "11px";
-    badge.style.lineHeight = "1";
-    badge.style.boxShadow = "0 2px 6px rgba(0,0,0,0.12)";
-    badge.style.padding = "0 6px";
-    if (roleLetter === "R") {
-      badge.style.background = "#0d6efd";
-      badge.style.color = "#fff";
-    } else if (roleLetter === "A") {
-      badge.style.background = "#198754";
-      badge.style.color = "#fff";
-    } else if (roleLetter === "C") {
-      badge.style.background = "#f59e0b";
-      badge.style.color = "#000";
-    } else {
-      badge.style.background = "#6c757d";
-      badge.style.color = "#fff";
+    avatarWrap.appendChild(avatar);
+
+    // badge overlay element — placed INSIDE avatarWrap so it visually overlaps avatar
+    if (roleLetter) {
+      const badge = document.createElement("div");
+      badge.className = `avatar-badge ${roleLetter.toLowerCase()}`; // e.g. "avatar-badge r"
+      badge.textContent = roleLetter;
+      avatarWrap.appendChild(badge);
     }
-    badge.textContent = roleLetter || "";
-    avWrap.appendChild(badge);
 
-    container.appendChild(avWrap);
+    container.appendChild(avatarWrap);
     return container;
   }
 
@@ -809,6 +888,12 @@ import { createSelectModule } from "./raci-select.js";
 
                 row.querySelector(".row-title").textContent = task.title;
 
+                // Before rendering, try to auto-convert to Overdue when applicable (non-blocking)
+                // We don't await it here to keep render responsive.
+                ensureOverdueStatusIfNeeded(task).catch((e) => {
+                  console.warn("Overdue check/save failed", e);
+                });
+
                 // move status before deadline
                 const metaCell = row.querySelector(".row-meta");
                 metaCell.textContent = task.status || "";
@@ -824,26 +909,37 @@ import { createSelectModule } from "./raci-select.js";
                   metaCell.parentNode.insertBefore(metaCell, deadlineCell);
                 }
 
+                // center status visually in dashboard
+                const statusCol = row.querySelector(".status-col");
+                if (statusCol) {
+                  statusCol.style.justifyContent = "center";
+                  statusCol.style.textAlign = "center";
+                }
+
                 // fill role containers - avatars clickable only if viewer (currentUser) is admin (role 0 or 1)
                 fillRoleContainer(
                   row.querySelector(".role-r"),
                   task.responsible,
-                  true
+                  true,
+                  "R"
                 );
                 fillRoleContainer(
                   row.querySelector(".role-a"),
                   task.accountable,
-                  true
+                  true,
+                  "A"
                 );
                 fillRoleContainer(
                   row.querySelector(".role-c"),
                   task.consulted,
-                  true
+                  true,
+                  "C"
                 );
                 fillRoleContainer(
                   row.querySelector(".role-i"),
                   task.informed,
-                  true
+                  true,
+                  "I"
                 );
 
                 // apply styling
@@ -927,8 +1023,13 @@ import { createSelectModule } from "./raci-select.js";
                   row;
                 rowRoot.dataset.taskId = task.id;
 
-                // title
+                // Title
                 row.querySelector(".row-title").textContent = task.title;
+
+                // Before rendering, try to auto-convert to Overdue when applicable (non-blocking)
+                ensureOverdueStatusIfNeeded(task).catch((e) => {
+                  console.warn("Overdue check/save failed", e);
+                });
 
                 // create inline status select and ensure it's BEFORE deadline
                 const metaCell = row.querySelector(".row-meta");
@@ -972,31 +1073,50 @@ import { createSelectModule } from "./raci-select.js";
                 fillRoleContainer(
                   row.querySelector(".role-r"),
                   task.responsible,
-                  true
+                  true,
+                  "R"
                 );
                 fillRoleContainer(
                   row.querySelector(".role-a"),
                   task.accountable,
-                  true
+                  true,
+                  "A"
                 );
                 fillRoleContainer(
                   row.querySelector(".role-c"),
                   task.consulted,
-                  true
+                  true,
+                  "C"
                 );
                 fillRoleContainer(
                   row.querySelector(".role-i"),
                   task.informed,
-                  true
+                  true,
+                  "I"
                 );
 
-                // actions
+                // actions (desktop)
                 const act = row.querySelector(".actions-col");
                 if (act)
                   act.innerHTML = `<div class="d-flex gap-2 justify-content-end">
             <button class="btn btn-sm btn-outline-secondary" data-action="edit-task" data-id="${task.id}"><i class="fa fa-pen"></i></button>
             <button class="btn btn-sm btn-outline-danger" data-action="delete-task" data-id="${task.id}"><i class="fa fa-trash"></i></button>
           </div>`;
+
+                // MOBILE: duplicate a compact action bar inside task column visible only on small screens
+                // uses Bootstrap utility class d-md-none to show only on < md (md = 768px).
+                const taskCol = row.querySelector(".task-col");
+                if (taskCol) {
+                  const mobileActions = document.createElement("div");
+                  mobileActions.className = "d-md-none mt-2";
+                  mobileActions.style.display = "flex";
+                  mobileActions.style.justifyContent = "flex-end";
+                  mobileActions.innerHTML = `<div class="btn-group" role="group" aria-label="mobile actions">
+                    <button class="btn btn-sm btn-outline-secondary" data-action="edit-task" data-id="${task.id}"><i class="fa fa-pen"></i></button>
+                    <button class="btn btn-sm btn-outline-danger" data-action="delete-task" data-id="${task.id}"><i class="fa fa-trash"></i></button>
+                  </div>`;
+                  taskCol.appendChild(mobileActions);
+                }
 
                 // apply immediate styling according to status
                 applyStatusStylingToRow(rowRoot, task.status || "");
@@ -1044,12 +1164,18 @@ import { createSelectModule } from "./raci-select.js";
   }
 
   /* ---------- fillRoleContainer ----------
-     Accepts `allowViewerClick` boolean. Avatars will be clickable only when:
+     Accepts `allowViewerClick` boolean and `roleLetter`.
+     Avatars will be clickable only when:
        - allowViewerClick is true (context allows it), AND
        - current viewer (currentUser) has role 0 or 1 (admin).
      For role === 2 viewers avatars are never clickable and Users page is hidden.
   */
-  function fillRoleContainer(container, ids, allowViewerClick = true) {
+  function fillRoleContainer(
+    container,
+    ids,
+    allowViewerClick = true,
+    roleLetter = ""
+  ) {
     container.innerHTML = "";
     const viewerIsAdmin =
       currentUser && (currentUser.role === 0 || currentUser.role === 1);
@@ -1064,10 +1190,11 @@ import { createSelectModule } from "./raci-select.js";
         return;
       }
 
-      const el = makeAvatarElement(u, 35, avatarsClickable);
+      // Use the avatar-with-badge chip
+      const el = makeAvatarChipWithBadge(id, roleLetter, 35, currentUserId);
+
       if (avatarsClickable) {
         el.addEventListener("click", () => {
-          // Only open Users page if the viewer is admin (guard again)
           if (!viewerIsAdmin) return;
           const nav = document.querySelector('.nav-link[data-view="users"]');
           if (nav) nav.click();
@@ -1076,7 +1203,6 @@ import { createSelectModule } from "./raci-select.js";
           }, 120);
         });
       } else {
-        // Make sure clicking doesn't navigate or open details
         el.addEventListener("click", (ev) => ev.stopImmediatePropagation());
       }
       container.appendChild(el);

@@ -297,6 +297,7 @@ import {
     "Completed",
     "Blocked",
     "On Hold",
+    "Overdue",
   ];
   function statusToClass(s) {
     if (!s) return "status-not-started";
@@ -304,13 +305,15 @@ import {
     if (key.includes("progress")) return "status-in-progress";
     if (key.includes("completed") || key.includes("done"))
       return "status-completed";
+    if (key.includes("overdue")) return "status-overdue";
     if (key.includes("block")) return "status-blocked";
     if (key.includes("hold")) return "status-on-hold";
     return "status-not-started";
   }
   function makeStatusBadge(status) {
     const span = document.createElement("span");
-    span.className = `status-badge ${statusToClass(status)}`;
+    const cls = statusToClass(status);
+    span.className = `status-badge ${cls}`;
     span.textContent = status || "Not Started";
     span.title = status || "";
     span.style.padding = "6px 10px";
@@ -323,6 +326,14 @@ import {
     span.style.maxWidth = "220px";
     span.style.overflow = "hidden";
     span.style.textOverflow = "ellipsis";
+
+    // Inline color for Overdue if CSS doesn't include it
+    if (cls === "status-overdue") {
+      span.style.background = "#fff1f0";
+      span.style.color = "#bf2e2e";
+      span.style.border = "1px solid rgba(240,102,102,0.12)";
+    }
+
     return span;
   }
   function makeSpinnerInline() {
@@ -332,6 +343,101 @@ import {
     s.setAttribute("aria-hidden", "true");
     s.style.marginLeft = "6px";
     return s;
+  }
+
+  /* ---------- deadline helpers (Overdue detection + auto-convert) ---------- */
+  // Returns true if deadline (yyyy-mm-dd or other date parseable) is strictly before now.
+  // For date-only deadlines we treat the deadline as 23:59:59 on the given day.
+  function isDeadlinePast(deadlineStr) {
+    if (!deadlineStr) return false;
+    const ymd = String(deadlineStr)
+      .trim()
+      .match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    let dl;
+    if (ymd) {
+      const y = parseInt(ymd[1], 10);
+      const m = parseInt(ymd[2], 10) - 1;
+      const d = parseInt(ymd[3], 10);
+      // end of day
+      dl = new Date(y, m, d, 23, 59, 59, 999);
+    } else {
+      dl = new Date(deadlineStr);
+    }
+    if (isNaN(dl.getTime())) return false;
+    const now = new Date();
+    return now.getTime() > dl.getTime();
+  }
+
+  // If a task is In Progress and deadline has passed, convert it to Overdue:
+  //  - update monthData/tasks object locally (optimistic)
+  //  - persist via serviceSaveTask() (best-effort)
+  // returns true if changed locally
+  async function ensureOverdueStatusIfNeeded(task) {
+    try {
+      if (!task || !task.deadline) return false;
+      const cur = String(task.status || "").trim();
+      const protectedStatuses = new Set([
+        "Completed",
+        "On Hold",
+        "Blocked",
+        "Overdue",
+      ]);
+      if (protectedStatuses.has(cur)) return false;
+      if (cur === "In Progress" && isDeadlinePast(task.deadline)) {
+        const prev = task.status || "";
+        task.status = "Overdue";
+
+        // best-effort persist
+        const payload = {
+          id: task.id,
+          month: getCurrentMonthFromApp() || "",
+          wing: task.wing,
+          subwing: task.subwing,
+          title: task.title,
+          deadline: task.deadline || "",
+          status: task.status,
+          responsible: [...(task.responsible || [])],
+          accountable: [...(task.accountable || [])],
+          consulted: [...(task.consulted || [])],
+          informed: [...(task.informed || [])],
+          createdAt: task.createdAt || new Date().toISOString(),
+        };
+
+        serviceSaveTask(payload)
+          .then(async (res) => {
+            if (res && res.ok) {
+              showToast &&
+                showToast("info", "Task marked Overdue (deadline passed)");
+              if (res.source === "server") {
+                // refresh month data if server authoritative
+                try {
+                  const md = await serviceLoadMonth(
+                    getCurrentMonthFromApp() || ""
+                  );
+                  if (md) {
+                    // replace tasks in local view's monthData when caller has it
+                  }
+                } catch (e) {}
+              }
+            } else if (res && res.serverError) {
+              // rollback locally on server error
+              task.status = prev;
+              showToast &&
+                showToast("error", "Failed to persist overdue status");
+            }
+          })
+          .catch((err) => {
+            console.warn("Failed to persist overdue status:", err);
+            // keep optimistic local change
+          });
+
+        return true;
+      }
+      return false;
+    } catch (err) {
+      console.error("ensureOverdueStatusIfNeeded error", err);
+      return false;
+    }
   }
 
   /* ---------- main renderer ---------- */
@@ -374,11 +480,15 @@ import {
       .status-badge.status-blocked { background:#FFF1F0; color:#f06666; border:1px solid rgba(240,102,102,0.12); }
       .status-badge.status-on-hold { background:#FFF6E6; color:#ffa94d; border:1px solid rgba(255,169,77,0.12); }
       .status-badge.status-not-started { background:#F5F5F5; color:#6c757d; border:1px solid rgba(108,117,125,0.06); }
+      .status-badge.status-overdue { /* fallback style if user CSS supports it */ }
       /* make sure long titles won't push layout badly */
       .top-grid > div { min-width: 0; }
       @media (max-width:980px){
         .yw-item .top-grid { grid-template-columns: 1fr 1fr; }
-        .top-grid > :nth-child(n+3){ display:none; }
+        /* hide only the status/select (3rd) and deadline (4th) on small screens,
+           keep the actions (5th) visible so the "View" button remains accessible */
+        .top-grid > :nth-child(3),
+        .top-grid > :nth-child(4) { display: none; }
         .top-grid > :first-child{ grid-column:1 / -1; }
       }
     `;
@@ -598,6 +708,12 @@ import {
           none.textContent = "—";
           cRoles.appendChild(none);
         }
+
+        // Before rendering status, check Overdue auto-convert (non-blocking)
+        ensureOverdueStatusIfNeeded(t).catch((e) => {
+          // non-fatal; just log
+          console.warn("Overdue check failed", e);
+        });
 
         // Status column: badge always visible. Select visible ONLY for Accountable users.
         const cStatus = document.createElement("div");
@@ -899,20 +1015,6 @@ import {
           });
       };
       mainMonthPicker.addEventListener("change", mainMonthListener);
-    }
-
-    function buildUsersMap(list) {
-      usersMap = {};
-      (list || []).forEach((u) => (usersMap[u.id] = u));
-    }
-
-    function tasksForUser(allTasks) {
-      if (!currentUserId) return [];
-      return (allTasks || []).filter((t) =>
-        ["responsible", "accountable", "consulted", "informed"].some((r) =>
-          (t[r] || []).some((id) => idEq(id, currentUserId))
-        )
-      );
     }
   } // end renderYourWorkViewInner
 
