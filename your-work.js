@@ -295,7 +295,6 @@ import {
     "Not Started",
     "In Progress",
     "Completed",
-    "Blocked",
     "On Hold",
     "Overdue",
   ];
@@ -306,7 +305,6 @@ import {
     if (key.includes("completed") || key.includes("done"))
       return "status-completed";
     if (key.includes("overdue")) return "status-overdue";
-    if (key.includes("block")) return "status-blocked";
     if (key.includes("hold")) return "status-on-hold";
     return "status-not-started";
   }
@@ -376,12 +374,7 @@ import {
     try {
       if (!task || !task.deadline) return false;
       const cur = String(task.status || "").trim();
-      const protectedStatuses = new Set([
-        "Completed",
-        "On Hold",
-        "Blocked",
-        "Overdue",
-      ]);
+      const protectedStatuses = new Set(["Completed", "On Hold", "Overdue"]);
       if (protectedStatuses.has(cur)) return false;
       if (cur === "In Progress" && isDeadlinePast(task.deadline)) {
         const prev = task.status || "";

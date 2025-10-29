@@ -393,6 +393,9 @@ body[data-view="dashboard"] .matrix-row.matrix-head .actions-col {
     gap: 8px;
   }
   .task-col {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
     grid-column: 1 / -1;
   }
   .role-col {

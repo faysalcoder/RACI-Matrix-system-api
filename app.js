@@ -182,7 +182,6 @@ import { createSelectModule } from "./raci-select.js";
     "Not Started",
     "In Progress",
     "Completed",
-    "Blocked",
     "On Hold",
     "Overdue",
   ];
@@ -223,12 +222,7 @@ import { createSelectModule } from "./raci-select.js";
       if (!task || !task.deadline) return false;
       const cur = String(task.status || "").trim();
       // do not change if already Completed, On Hold, Blocked, or Overdue
-      const protectedStatuses = new Set([
-        "Completed",
-        "On Hold",
-        "Blocked",
-        "Overdue",
-      ]);
+      const protectedStatuses = new Set(["Completed", "On Hold", "Overdue"]);
       if (protectedStatuses.has(cur)) return false;
       // Only auto-convert if currently "In Progress" and deadline passed
       if (cur === "In Progress" && isDeadlinePast(task.deadline)) {
@@ -255,18 +249,14 @@ import { createSelectModule } from "./raci-select.js";
         serviceSaveTask(payload)
           .then((res) => {
             if (res && res.ok) {
-              // optionally notify
               showToast &&
                 showToast("info", "Task marked Overdue (deadline passed)");
-              // try to refresh month data if server is authoritative
               if (res.source === "server") {
                 return serviceLoadMonth(currentMonth).then((md) => {
                   monthData = md || monthData;
                 });
               }
             } else {
-              // rollback locally if server refused (best-effort)
-              // (we keep the local optimistic change, but revert if server returned serverError)
               if (res && res.serverError) {
                 task.status = prev;
                 localSaveMonth(currentMonth, monthData);
@@ -277,7 +267,7 @@ import { createSelectModule } from "./raci-select.js";
           })
           .catch((err) => {
             console.warn("Failed save Overdue:", err);
-            // keep optimistic local change; it can be resolved later manually
+            // keep optimistic local change
           });
         return true;
       }
@@ -505,6 +495,52 @@ import { createSelectModule } from "./raci-select.js";
     }
   }
 
+  /* ---------- URL / History routing helpers ---------- */
+  function buildURL(view, month) {
+    const params = new URLSearchParams(window.location.search);
+    if (view) params.set("view", view);
+    else params.delete("view");
+    if (month) params.set("month", month);
+    else params.delete("month");
+    const qs = params.toString();
+    return (
+      window.location.pathname + (qs ? `?${qs}` : "") + (location.hash || "")
+    );
+  }
+  function getURLView() {
+    const params = new URLSearchParams(location.search);
+    if (params.get("view")) return params.get("view");
+    if (location.hash) return location.hash.replace(/^#/, "");
+    return null;
+  }
+  function getURLMonth() {
+    const params = new URLSearchParams(location.search);
+    return params.get("month") || null;
+  }
+
+  function setNavLinksHref() {
+    navLinks.forEach((a) => {
+      const v = a.dataset.view;
+      if (v) a.setAttribute("href", buildURL(v, currentMonth));
+    });
+  }
+
+  // central navigation function that updates URL and renders
+  async function navigateTo(view, { replace = false } = {}) {
+    try {
+      const newUrl = buildURL(view, currentMonth);
+      if (replace) history.replaceState({ view }, "", newUrl);
+      else history.pushState({ view }, "", newUrl);
+      // update active nav class and render
+      $$(".nav-link").forEach((n) => n.classList.remove("active"));
+      const nav = document.querySelector(`.nav-link[data-view="${view}"]`);
+      if (nav) nav.classList.add("active");
+      await renderView(view);
+    } catch (err) {
+      console.error("navigateTo error", err);
+    }
+  }
+
   /* ---------- sidebar toggle ---------- */
   function setupSidebarToggle() {
     btnToggle?.addEventListener("click", () => {
@@ -535,7 +571,15 @@ import { createSelectModule } from "./raci-select.js";
     uiEnsureInit();
 
     // wire nav links
+    // set hrefs so they are linkable / openable in new tabs
+    setNavLinksHref();
+
     navLinks.forEach((a) => a.addEventListener("click", navClick));
+
+    // set monthPicker from URL if present
+    const urlMonth = getURLMonth();
+    if (urlMonth) currentMonth = urlMonth;
+
     if (monthPicker) monthPicker.value = currentMonth;
     monthPicker?.addEventListener("change", onMonthChange);
 
@@ -610,15 +654,40 @@ import { createSelectModule } from "./raci-select.js";
         modalAddUser && modalAddUser.show && modalAddUser.show();
     });
 
+    // initialize state & view from URL
     await reloadAll();
     setupSidebarToggle();
 
-    navLinks.forEach((n) => n.classList.remove("active"));
+    // set initial view based on URL or default dashboard
+    const initialView = getURLView() || "dashboard";
+
+    // ensure nav active state
+    $$(".nav-link").forEach((n) => n.classList.remove("active"));
     const defaultNav = document.querySelector(
-      '.nav-link[data-view="dashboard"]'
+      `.nav-link[data-view="${initialView}"]`
     );
     if (defaultNav) defaultNav.classList.add("active");
-    await renderView("dashboard");
+
+    // make sure nav link hrefs reflect currentMonth now
+    setNavLinksHref();
+
+    // render initial view
+    await renderView(initialView);
+
+    // listen to popstate to support back/forward
+    window.addEventListener("popstate", async (ev) => {
+      const view = getURLView() || "dashboard";
+      const urlMonth2 = getURLMonth();
+      if (urlMonth2) currentMonth = urlMonth2;
+      if (monthPicker) monthPicker.value = currentMonth;
+      // update hrefs so they keep month in sync
+      setNavLinksHref();
+      // set active nav
+      $$(".nav-link").forEach((n) => n.classList.remove("active"));
+      const nav = document.querySelector(`.nav-link[data-view="${view}"]`);
+      if (nav) nav.classList.add("active");
+      await renderView(view);
+    });
   }
 
   /* ---------- reload helpers ---------- */
@@ -668,14 +737,19 @@ import { createSelectModule } from "./raci-select.js";
   /* ---------- navigation ---------- */
   async function navClick(e) {
     e.preventDefault();
-    navLinks.forEach((n) => n.classList.remove("active"));
-    e.currentTarget.classList.add("active");
+    // Use navigateTo so URL is updated and view rendered accordingly
     const view = e.currentTarget.getAttribute("data-view");
-    await renderView(view);
+    await navigateTo(view);
   }
   async function onMonthChange() {
     currentMonth = monthPicker.value || defaultMonth();
+    // update URL month param without creating a history entry
+    const curView = document.body.dataset.view || getURLView() || "dashboard";
+    history.replaceState({}, "", buildURL(curView, currentMonth));
+    // refresh month data and current view
     monthData = await serviceLoadMonth(currentMonth);
+    // update nav link hrefs to include new month
+    setNavLinksHref();
     await renderView(
       (
         document.querySelector(".nav-link.active") || {
@@ -699,10 +773,10 @@ import { createSelectModule } from "./raci-select.js";
       about: "What is RACI?",
     };
     const subs = {
-      dashboard: "RACI Matrix (read-only)",
-      manage: "Create / Edit tasks and RACI assignments",
+      dashboard: "",
+      manage: "",
       wings: "Manage Wings & Subwings",
-      users: "Users & User Panel",
+      users: "",
       "your-work": "Tasks assigned to you (R/A/C/I)",
       reports: "Generate month reports",
       about: "Learn about the RACI responsibility matrix",
@@ -1196,11 +1270,13 @@ import { createSelectModule } from "./raci-select.js";
       if (avatarsClickable) {
         el.addEventListener("click", () => {
           if (!viewerIsAdmin) return;
-          const nav = document.querySelector('.nav-link[data-view="users"]');
-          if (nav) nav.click();
-          setTimeout(() => {
-            usersModule.render().then(() => showUserDetail(u));
-          }, 120);
+          // navigate to users view via navigateTo so URL updates
+          navigateTo("users").then(() => {
+            // ensure users module rendered then show detail
+            setTimeout(() => {
+              usersModule.render().then(() => showUserDetail(u));
+            }, 120);
+          });
         });
       } else {
         el.addEventListener("click", (ev) => ev.stopImmediatePropagation());
@@ -1522,16 +1598,111 @@ import { createSelectModule } from "./raci-select.js";
     }
     const card = document.createElement("div");
     card.className = "card p-4";
+
     card.innerHTML = `
-      <h4 class="mb-2">RACI Matrix — Responsibility Assignment</h4>
-      <p>RACI is a lightweight model that clarifies roles and responsibilities for tasks or processes.</p>
+  <h4 class="mb-2">RACI Matrix — Responsibility Assignment</h4>
+
+  <p>
+    The <strong>RACI Matrix</strong> is a simple framework to define who is
+    <em>Responsible</em>, <em>Accountable</em>, <em>Consulted</em>, and <em>Informed</em>
+    for each task or process. It prevents confusion and clarifies ownership.
+  </p>
+
+  <div style="display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;">
+    <div style="min-width:260px;flex:1;">
       <ul>
-        <li><strong>R — Responsible</strong>: Person(s) who do the work to complete the task.</li>
-        <li><strong>A — Accountable</strong>: Single person who is ultimately answerable and who signs off.</li>
-        <li><strong>C — Consulted</strong>: People whose input is sought (two-way communication).</li>
-        <li><strong>I — Informed</strong>: People kept up-to-date (one-way communication).</li>
+        <li><strong>R — Responsible</strong>: Person(s) who perform the actual work to complete the task.</li>
+        <li><strong>A — Accountable</strong>: The single person who owns the outcome and signs off the work.</li>
+        <li><strong>C — Consulted</strong>: Those whose input or expertise is sought (two-way communication).</li>
+        <li><strong>I — Informed</strong>: People kept updated on progress or decisions (one-way communication).</li>
       </ul>
-    `;
+
+      <h6 class="mt-2">Quick Tips</h6>
+      <ul>
+        <li>Each task should have exactly one <strong>A</strong>.</li>
+        <li>Multiple <strong>R</strong> roles are fine — clarify each person’s part.</li>
+        <li>Keep <strong>C</strong> and <strong>I</strong> lists concise to reduce noise.</li>
+        <li>Review the RACI chart regularly to ensure it reflects current ownership.</li>
+      </ul>
+    </div>
+
+    <!-- SVG Tree Visualization -->
+    <div style="flex:0 0 360px; display:flex;align-items:center;justify-content:center;">
+      <svg width="320" height="220" viewBox="0 0 320 220" aria-hidden="true" role="img">
+        <!-- connectors -->
+        <line x1="160" y1="90" x2="160" y2="120" stroke="#cbd5e1" stroke-width="2" />
+        <line x1="160" y1="120" x2="40"  y2="180" stroke="#cbd5e1" stroke-width="2" />
+        <line x1="160" y1="120" x2="120" y2="180" stroke="#cbd5e1" stroke-width="2" />
+        <line x1="160" y1="120" x2="200" y2="180" stroke="#cbd5e1" stroke-width="2" />
+        <line x1="160" y1="120" x2="280" y2="180" stroke="#cbd5e1" stroke-width="2" />
+
+        <!-- central task -->
+        <rect x="100" y="40" width="120" height="40" rx="8" ry="8" fill="#eef2ff" stroke="#c7d2fe" />
+        <text x="160" y="65" font-size="14" text-anchor="middle" fill="#0f172a" font-weight="700">Task</text>
+
+        <!-- R -->
+        <circle cx="40" cy="177" r="23" fill="#0d6efd" />
+        <text x="40" y="182" font-size="18" text-anchor="middle" fill="#fff" font-weight="700">R</text>
+        <text x="40" y="220" font-size="11" text-anchor="middle" fill="#1f2937">Responsible</text>
+
+        <!-- A -->
+        <circle cx="120" cy="177" r="23" fill="#198754" />
+        <text x="120" y="182" font-size="18" text-anchor="middle" fill="#fff" font-weight="700">A</text>
+        <text x="120" y="220" font-size="11" text-anchor="middle" fill="#1f2937">Accountable</text>
+
+        <!-- C -->
+        <circle cx="200" cy="177" r="23" fill="#f59e0b" />
+        <text x="200" y="182" font-size="18" text-anchor="middle" fill="#000" font-weight="700">C</text>
+        <text x="200" y="220" font-size="11" text-anchor="middle" fill="#1f2937">Consulted</text>
+
+        <!-- I -->
+        <circle cx="280" cy="177" r="23" fill="#6c757d" />
+        <text x="280" y="182" font-size="18" text-anchor="middle" fill="#fff" font-weight="700">I</text>
+        <text x="280" y="220" font-size="11" text-anchor="middle" fill="#1f2937">Informed</text>
+
+        <text x="12" y="20" font-size="11" fill="#475569">
+          Diagram: central task connects to R, A, C, and I roles.
+        </text>
+      </svg>
+    </div>
+  </div>
+
+  <h6 class="mt-3">When to Use</h6>
+  <p class="small text-muted">
+    RACI works best for projects with multiple stakeholders where clear role definition prevents duplication and delays.
+  </p>
+
+  <hr class="my-3" />
+
+  <h5 class="mb-2">🔧 User Guide for This System</h5>
+  <ul>
+    <li><strong>A (Accountable)</strong> — Can <u>create</u>, <u>assign</u>, and <u>manage</u> tasks. They are the task owners.</li>
+    <li><strong>R (Responsible)</strong> — Executes the work assigned by “A”. Can <u>update task progress</u> but not delete or reassign tasks.</li>
+    <li><strong>C (Consulted)</strong> — Can <u>review</u> and <u>comment</u> on assigned tasks. Provides expert input when needed.</li>
+    <li><strong>I (Informed)</strong> — Can only <u>view</u> tasks and track updates. Cannot modify or create any tasks.</li>
+  </ul>
+
+  <h6 class="mt-2">🔐 Role Permissions in System</h6>
+  <ul class="small text-muted">
+    <li><strong>Role 0 (Admin)</strong> — Full access: can manage all users, wings, and RACI mappings.</li>
+    <li><strong>Role 1 (Manager / A)</strong> — Can create and edit their own tasks; manage R, C, and I assignments under their supervision.</li>
+    <li><strong>Role 2 (User)</strong> — Limited access: cannot create or delete tasks; can only update their assigned responsibilities or view tasks.</li>
+  </ul>
+
+  <h6 class="mt-2">⚙️ Workflow Summary</h6>
+  <ol class="small">
+    <li><strong>A</strong> creates a task → assigns <strong>R</strong>, <strong>C</strong>, and <strong>I</strong> roles.</li>
+    <li><strong>R</strong> executes and updates task progress in real time.</li>
+    <li><strong>C</strong> provides feedback if consulted.</li>
+    <li><strong>I</strong> automatically stays updated with task changes.</li>
+    <li>Only <strong>A</strong> or <strong>Admin</strong> can edit or delete a task.</li>
+  </ol>
+
+  <p class="small text-muted mt-1">
+    ✅ This ensures accountability and transparency across all project workflows.
+  </p>
+`;
+
     viewContainer.appendChild(card);
   }
 
@@ -1578,7 +1749,10 @@ import { createSelectModule } from "./raci-select.js";
     if (!tasks.length) {
       const none = document.createElement("div");
       none.className = "small text-muted";
-      none.textContent = `No assignments for ${currentMonth}`;
+      none.textContent = `No assignments for  ${formatDateDisplay(currentMonth)
+        .split(" ")
+        .slice(1)
+        .join(" ")}`;
       detail.appendChild(none);
       return;
     }
